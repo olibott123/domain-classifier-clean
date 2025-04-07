@@ -1,5 +1,5 @@
 flask==2.3.2
-pinecone-client==2.2.4
+pinecone-client==2.2.4  # This version is current
 snowflake-connector-python==3.0.4
 scikit-learn==1.2.2
 numpy==1.24.3
@@ -8,7 +8,7 @@ nltk==3.8.1
 gunicorn==20.1.0
 flask-cors==4.0.0
 python-dotenv==1.0.0
-setuptools
-wheel
-cython
-cmake
+setuptools==70.3.0
+wheel==0.45.1
+cython==3.0.12
+cmake==3.29.3
