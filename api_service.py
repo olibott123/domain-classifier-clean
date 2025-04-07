@@ -216,6 +216,84 @@ def test_llm_classification():
     except Exception as e:
         logger.exception(f"Error in test-llm-classification: {str(e)}")
         return jsonify({"error": str(e)}), 500
+@app.route('/classify-domain', methods=['POST'])
+def classify_domain():
+    data = request.get_json()
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    try:
+        # Ensure URL is properly formatted
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme:
+            url = f"https://{url}"
+        
+        domain = parsed_url.netloc
+
+        # Check existing records in Snowflake first
+        existing_record = snowflake_conn.check_existing_classification(domain)
+        if existing_record:
+            logger.info(f"[Snowflake] Existing record found for domain {domain}")
+            return jsonify({
+                "domain": domain,
+                "predicted_class": existing_record.get('company_type', 'Unknown'),
+                "confidence_score": existing_record.get('confidence_score', 0),
+                "low_confidence": existing_record.get('low_confidence', True),
+                "reasoning": "Classification retrieved from existing records"
+            }), 200
+
+        # If no existing record, proceed with crawl and classification
+        logger.info(f"Starting crawl for {url}")
+        crawl_run_id = start_apify_crawl(url)
+        crawl_results = fetch_apify_results(crawl_run_id)
+
+        if not crawl_results['success']:
+            logger.error(f"Crawl failed: {crawl_results.get('error', 'Unknown error')}")
+            return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+
+        content = crawl_results['content']
+        logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
+        
+        # Classify the domain
+        classification = classifier.classify_domain(content, domain=domain)
+        classification = ensure_serializable(classification)
+        
+        # Save to Snowflake
+        success_content, error_content = snowflake_conn.save_domain_content(
+            domain=domain, url=url, content=content
+        )
+
+        llm_explanation = classification.get('llm_explanation', '')
+        model_metadata = {
+            'model_version': '1.0',
+            'llm_model': 'claude-3-haiku-20240307',
+            'llm_explanation': llm_explanation[:1000] if llm_explanation else ''
+        }
+
+        success_class, error_class = snowflake_conn.save_classification(
+            domain=domain,
+            company_type=str(classification['predicted_class']),
+            confidence_score=float(classification['max_confidence']),
+            all_scores=json.dumps(classification['confidence_scores']),
+            model_metadata=json.dumps(model_metadata),
+            low_confidence=bool(classification['low_confidence']),
+            detection_method=str(classification['detection_method'])
+        )
+
+        # Return simplified response
+        return jsonify({
+            "domain": domain,
+            "predicted_class": str(classification['predicted_class']),
+            "confidence_score": float(classification['max_confidence']),
+            "low_confidence": bool(classification['low_confidence']),
+            "reasoning": str(classification.get('llm_explanation', ''))
+        }), 200
+
+    except Exception as e:
+        logger.exception(f"Error in classify-domain: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, debug=True, use_reloader=False)
