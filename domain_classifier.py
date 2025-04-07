@@ -3,6 +3,7 @@ import re
 import logging
 import pickle
 import numpy as np
+import pinecone
 from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
@@ -49,8 +50,7 @@ class DomainClassifier:
             logger.info(f"Initialized LLM classifier with model: {llm_model}")
 
         if use_pinecone:
-            from pinecone import Pinecone
-            pc = Pinecone(api_key=pinecone_api_key)
+            pc = pinecone.Pinecone(api_key=pinecone_api_key)
             self.pinecone_index = pc.Index(pinecone_index_name)
             logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
 
