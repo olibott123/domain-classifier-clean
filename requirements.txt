@@ -1,0 +1,9 @@
+flask
+pinecone-client
+snowflake-connector-python
+scikit-learn
+numpy
+requests
+nltk
+gunicorn
+flask-cors
