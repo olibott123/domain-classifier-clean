@@ -1,5 +1,5 @@
 flask
-pinecone-client
+pinecone
 snowflake-connector-python
 scikit-learn
 numpy
