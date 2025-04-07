@@ -8,3 +8,6 @@ nltk==3.8.1
 gunicorn==20.1.0
 flask-cors==4.0.0
 python-dotenv==1.0.0
+wheel
+cython
+pyarrow==10.0.1
