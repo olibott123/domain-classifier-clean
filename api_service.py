@@ -277,7 +277,7 @@ def check_crawl(crawl_id):
         logger.exception(f"Error in check-crawl: {str(e)}")
         return jsonify({"status": "error", "error": str(e)}), 500
 
-# Maintain the original classify-domain endpoint for backward compatibility
+# Modified classify-domain endpoint to wait indefinitely
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     # Handle preflight requests
@@ -335,18 +335,17 @@ def classify_domain():
             }), 200
         
         # If no cached result, start a crawl and wait for completion 
+        logger.info(f"Starting crawl for {url}")
         crawl_run_id = start_apify_crawl(url)
         
-        # Poll for results with a maximum wait time of 60 seconds
-        max_wait_time = 60  # seconds
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_time:
+        # No timeout - poll until the crawl completes or fails
+        while True:
             crawl_results = fetch_apify_results(crawl_run_id)
             
             if crawl_results.get('success'):
                 # Crawl completed successfully
                 content = crawl_results.get('content', '')
+                logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
                 
                 # Classify the domain
                 classification = classifier.classify_domain(content, domain=domain)
@@ -386,11 +385,6 @@ def classify_domain():
             
             # Still processing, wait and try again
             time.sleep(5)
-        
-        # If we get here, we've timed out
-        return jsonify({
-            "error": "Classification timed out. Please try again or use the two-step process with /start-crawl and /check-crawl endpoints."
-        }), 504  # Gateway Timeout
         
     except Exception as e:
         logger.exception(f"Error in classify-domain: {str(e)}")
@@ -447,11 +441,8 @@ def crawl_and_save():
         logger.info(f"Starting crawl for {url}")
         crawl_run_id = start_apify_crawl(url)
         
-        # Wait for crawl to complete with a longer timeout
-        max_wait_time = 120  # seconds
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_time:
+        # Wait for crawl to complete indefinitely
+        while True:
             crawl_results = fetch_apify_results(crawl_run_id)
             
             if crawl_results.get('success'):
@@ -461,9 +452,6 @@ def crawl_and_save():
                 return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
                 
             time.sleep(5)
-            
-        if not crawl_results.get('success'):
-            return jsonify({"error": "Crawl timed out"}), 504
         
         content = crawl_results['content']
         logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
