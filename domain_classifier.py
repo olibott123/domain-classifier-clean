@@ -3,7 +3,6 @@ import re
 import logging
 import pickle
 import numpy as np
-import pinecone
 from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
@@ -24,55 +23,55 @@ except:
 
 class DomainClassifier:
     def __init__(
-    self,
-    model_path=None,
-    use_pinecone=False,
-    pinecone_api_key=None,
-    pinecone_index_name=None,
-    confidence_threshold=0.6,
-    use_llm=False,
-    anthropic_api_key=None,
-    llm_model="claude-3-haiku-20240307"
-):
-    pinecone_api_key = pinecone_api_key or os.environ.get('PINECONE_API_KEY')
-    anthropic_api_key = anthropic_api_key or os.environ.get('ANTHROPIC_API_KEY')
+        self,
+        model_path=None,
+        use_pinecone=False,
+        pinecone_api_key=None,
+        pinecone_index_name=None,
+        confidence_threshold=0.6,
+        use_llm=False,
+        anthropic_api_key=None,
+        llm_model="claude-3-haiku-20240307"
+    ):
+        pinecone_api_key = pinecone_api_key or os.environ.get('PINECONE_API_KEY')
+        anthropic_api_key = anthropic_api_key or os.environ.get('ANTHROPIC_API_KEY')
 
-    # Check if API keys are present
-    if use_pinecone and not pinecone_api_key:
-        logger.error("Pinecone API key is missing")
-        use_pinecone = False
+        # Check if API keys are present
+        if use_pinecone and not pinecone_api_key:
+            logger.error("Pinecone API key is missing")
+            use_pinecone = False
 
-    if use_llm and not anthropic_api_key:
-        logger.error("Anthropic API key is missing")
-        use_llm = False
+        if use_llm and not anthropic_api_key:
+            logger.error("Anthropic API key is missing")
+            use_llm = False
 
-    self.vectorizer = None
-    self.classifier = None
-    self.label_encoder = None
-    self.classes = None
-    self.confidence_threshold = confidence_threshold
-    self.use_pinecone = use_pinecone
-    self.pinecone_index = None
+        self.vectorizer = None
+        self.classifier = None
+        self.label_encoder = None
+        self.classes = None
+        self.confidence_threshold = confidence_threshold
+        self.use_pinecone = use_pinecone
+        self.pinecone_index = None
 
-    # LLM integration
-    self.use_llm = use_llm
-    self.llm_classifier = None
-    if use_llm and anthropic_api_key:
-        self.llm_classifier = LLMClassifier(api_key=anthropic_api_key, model=llm_model)
-        logger.info(f"Initialized LLM classifier with model: {llm_model}")
+        # LLM integration
+        self.use_llm = use_llm
+        self.llm_classifier = None
+        if use_llm and anthropic_api_key:
+            self.llm_classifier = LLMClassifier(api_key=anthropic_api_key, model=llm_model)
+            logger.info(f"Initialized LLM classifier with model: {llm_model}")
 
-    if use_pinecone:
-        try:
-            pinecone.init(api_key=pinecone_api_key)
-            self.pinecone_index = pinecone.Index(pinecone_index_name)
-            logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
-        except Exception as e:
-            logger.error(f"Failed to initialize Pinecone: {e}")
-            self.use_pinecone = False
+        if use_pinecone:
+            try:
+                import pinecone
+                pinecone.init(api_key=pinecone_api_key)
+                self.pinecone_index = pinecone.Index(pinecone_index_name)
+                logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Pinecone: {e}")
+                self.use_pinecone = False
 
-    if model_path:
-        self.load_model(model_path)
-
+        if model_path:
+            self.load_model(model_path)
 
     def preprocess_text(self, text):
         if not text:
