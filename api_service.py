@@ -54,7 +54,63 @@ classifier = DomainClassifier(
 
 snowflake_conn = SnowflakeConnector()
 
-# [Rest of your existing functions - start_apify_crawl, fetch_apify_results, ensure_serializable]
+def start_apify_crawl(url):
+    """Start a crawl of the specified URL using Apify."""
+    try:
+        endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
+        payload = {"startUrls": [{"url": url}]}
+        headers = {"Content-Type": "application/json"}
+        
+        response = requests.post(endpoint, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()['data']['id']
+    except Exception as e:
+        logger.error(f"Error starting Apify crawl: {e}")
+        raise ValueError(f"Failed to start crawl: {e}")
+
+def fetch_apify_results(run_id, timeout=300, interval=10):
+    """Fetch the results of an Apify crawl."""
+    try:
+        endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            response = requests.get(endpoint)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data:
+                combined_text = ' '.join(item['text'] for item in data if item.get('text'))
+                domain_url = data[0].get('url', '')
+                return {
+                    'success': True,
+                    'domain': domain_url,
+                    'content': combined_text,
+                    'pages_crawled': len(data)
+                }
+            time.sleep(interval)
+        
+        return {'success': False, 'error': 'Timeout or no data returned'}
+    except Exception as e:
+        logger.error(f"Error fetching Apify results: {e}")
+        return {'success': False, 'error': str(e)}
+
+# Helper function to ensure all values are JSON serializable
+def ensure_serializable(obj):
+    if isinstance(obj, dict):
+        return {k: ensure_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [ensure_serializable(i) for i in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    else:
+        return obj
 
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
@@ -188,6 +244,126 @@ def save_to_snowflake(domain, url, content, classification):
     except Exception as e:
         logger.error(f"Error saving to Snowflake: {e}")
         return False
+
+@app.route('/crawl-and-save', methods=['POST'])
+def crawl_and_save():
+    data = request.get_json()
+    url = data.get('url')
+    if not url:
+        return jsonify({"error": "URL or domain required"}), 400
+    
+    parsed_url = urlparse(url)
+    if not parsed_url.scheme:
+        url = f"https://{url}"
+    domain = urlparse(url).netloc
+    
+    # Check existing records in Snowflake
+    existing_record = snowflake_conn.check_existing_classification(domain)
+    if existing_record:
+        logger.info(f"[Snowflake] Existing record found for domain {domain}")
+        return jsonify({"status": "exists", "domain": domain, "record": existing_record}), 200
+    
+    # No existing record, proceed to crawl
+    try:
+        logger.info(f"Starting crawl for {url}")
+        crawl_run_id = start_apify_crawl(url)
+        crawl_results = fetch_apify_results(crawl_run_id)
+        
+        if not crawl_results['success']:
+            logger.error(f"Crawl failed: {crawl_results.get('error', 'Unknown error')}")
+            return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+        
+        content = crawl_results['content']
+        logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
+        
+        # Classify the domain
+        classification = classifier.classify_domain(content, domain=domain)
+        classification = ensure_serializable(classification)
+        
+        # Saving to Snowflake
+        logger.info(f"Saving domain content to Snowflake for {domain}")
+        success_content, error_content = snowflake_conn.save_domain_content(
+            domain=domain, url=url, content=content
+        )
+        
+        # Store the additional LLM explanation in the metadata
+        llm_explanation = classification.get('llm_explanation', '')
+        model_metadata = {
+            'model_version': '1.0',
+            'llm_model': 'claude-3-haiku-20240307',
+            'llm_explanation': llm_explanation[:1000] if llm_explanation else ''
+        }
+        
+        logger.info(f"Sending classification to Snowflake: {classification['predicted_class']}")
+        success_class, error_class = snowflake_conn.save_classification(
+            domain=domain,
+            company_type=str(classification['predicted_class']),
+            confidence_score=float(classification['max_confidence']),
+            all_scores=json.dumps(classification['confidence_scores']),
+            model_metadata=json.dumps(model_metadata),
+            low_confidence=bool(classification['low_confidence']),
+            detection_method=str(classification['detection_method'])
+        )
+        
+        if not success_class:
+            logger.error(f"ERROR saving classification to Snowflake: {error_class}")
+        else:
+            logger.info(f"SUCCESS saving classification to Snowflake for domain: {domain}")
+        
+        # Build and sanitize response to ensure JSON serialization
+        response_data = {
+            "domain": domain,
+            "classification": {
+                "predicted_class": str(classification['predicted_class']),
+                "confidence_scores": {k: float(v) for k, v in classification['confidence_scores'].items()},
+                "max_confidence": float(classification['max_confidence']),
+                "low_confidence": bool(classification['low_confidence']),
+                "detection_method": str(classification['detection_method']),
+                "llm_explanation": str(classification.get('llm_explanation', ''))
+            },
+            "snowflake": {
+                "content_saved": bool(success_content),
+                "classification_saved": bool(success_class),
+                "errors": {
+                    "content_error": str(error_content) if error_content else None,
+                    "classification_error": str(error_class) if error_class else None
+                }
+            }
+        }
+        
+        return jsonify(response_data), 200
+    
+    except Exception as e:
+        logger.exception(f"Error in crawl-and-save: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# Add a new endpoint to test LLM classification directly
+@app.route('/test-llm-classification', methods=['POST'])
+def test_llm_classification():
+    data = request.get_json()
+    domain = data.get('domain')
+    content = data.get('content')
+    
+    if not content:
+        return jsonify({"error": "Content required for classification test"}), 400
+    
+    try:
+        # Directly use the LLM classifier part
+        llm_result = classifier.llm_classifier.classify(content, domain)
+        # Ensure all values are JSON serializable
+        llm_result = ensure_serializable(llm_result)
+        
+        return jsonify({
+            "domain": domain,
+            "llm_classification": llm_result
+        }), 200
+    
+    except Exception as e:
+        logger.exception(f"Error in test-llm-classification: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5005, debug=True, use_reloader=False)
 
 # Keep your existing crawl-and-save endpoint
 
