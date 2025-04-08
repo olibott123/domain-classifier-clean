@@ -1,5 +1,5 @@
 flask==2.3.2
-pinecone>=2.2.4  # Use the version format that allows newer versions
+pinecone>=6.0.0
 snowflake-connector-python==3.0.4
 scikit-learn==1.2.2
 numpy==1.24.3
