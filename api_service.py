@@ -58,7 +58,11 @@ def start_apify_crawl(url):
     """Start a crawl of the specified URL using Apify."""
     try:
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
-        payload = {"startUrls": [{"url": url}]}
+        payload = {
+            "startUrls": [{"url": url}],
+            "maxCrawlingDepth": 1,  # Limit depth for faster crawls
+            "maxCrawlPages": 10     # Limit pages for faster crawls
+        }
         headers = {"Content-Type": "application/json"}
         
         response = requests.post(endpoint, json=payload, headers=headers)
@@ -68,12 +72,30 @@ def start_apify_crawl(url):
         logger.error(f"Error starting Apify crawl: {e}")
         raise ValueError(f"Failed to start crawl: {e}")
 
-def fetch_apify_results(run_id, timeout=300, interval=10):
-    """Fetch the results of an Apify crawl."""
+def fetch_apify_results(run_id, timeout=5, interval=2):
+    """
+    Fetch the results of an Apify crawl.
+    The short timeout is used for status checks, not for the full crawl.
+    """
     try:
         endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
-        start_time = time.time()
+        status_endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_API_TOKEN}"
         
+        # First check if the run is still in progress
+        status_response = requests.get(status_endpoint)
+        status_response.raise_for_status()
+        status_data = status_response.json()
+        
+        status = status_data.get('status')
+        
+        if status in ['RUNNING', 'READY']:
+            return {'success': False, 'error': 'Crawl in progress', 'status': status}
+        
+        if status in ['FAILED', 'ABORTED', 'TIMED-OUT']:
+            return {'success': False, 'error': f'Crawl {status}', 'status': status}
+        
+        # If the run is finished, get the data
+        start_time = time.time()
         while time.time() - start_time < timeout:
             response = requests.get(endpoint)
             response.raise_for_status()
@@ -86,14 +108,15 @@ def fetch_apify_results(run_id, timeout=300, interval=10):
                     'success': True,
                     'domain': domain_url,
                     'content': combined_text,
-                    'pages_crawled': len(data)
+                    'pages_crawled': len(data),
+                    'status': 'SUCCEEDED'
                 }
             time.sleep(interval)
         
-        return {'success': False, 'error': 'Timeout or no data returned'}
+        return {'success': False, 'error': 'No data returned', 'status': status}
     except Exception as e:
         logger.error(f"Error fetching Apify results: {e}")
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(e), 'status': 'ERROR'}
 
 # Helper function to ensure all values are JSON serializable
 def ensure_serializable(obj):
@@ -112,8 +135,8 @@ def ensure_serializable(obj):
     else:
         return obj
 
-@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
-def classify_domain():
+@app.route('/start-crawl', methods=['POST', 'OPTIONS'])
+def start_crawl():
     # Handle preflight requests
     if request.method == 'OPTIONS':
         return '', 204
@@ -160,6 +183,7 @@ def classify_domain():
                 reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
             
             return jsonify({
+                "status": "complete",
                 "domain": domain,
                 "predicted_class": existing_record.get('company_type', 'Unknown'),
                 "confidence_score": existing_record.get('confidence_score', 0),
@@ -170,19 +194,53 @@ def classify_domain():
                 "source": "cached" 
             }), 200
 
-        # If no existing record, proceed with crawl and classification
-        logger.info(f"Starting crawl for {url}")
+        # If no existing record, start a new crawl
+        logger.info(f"Starting new crawl for {url}")
         crawl_run_id = start_apify_crawl(url)
-        crawl_results = fetch_apify_results(crawl_run_id)
-
-        if not crawl_results['success']:
-            logger.error(f"Crawl failed: {crawl_results.get('error', 'Unknown error')}")
-            return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
-
-        content = crawl_results['content']
-        logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
         
-        # Classify the domain
+        return jsonify({
+            "status": "started",
+            "domain": domain,
+            "crawl_id": crawl_run_id,
+            "message": "Classification started. Check status with /check-crawl endpoint."
+        }), 202  # 202 Accepted
+
+    except Exception as e:
+        logger.exception(f"Error in start-crawl: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/check-crawl/<crawl_id>', methods=['GET'])
+def check_crawl(crawl_id):
+    try:
+        # Check if the crawl is complete
+        crawl_results = fetch_apify_results(crawl_id)
+        
+        # If still in progress
+        if not crawl_results.get('success'):
+            if crawl_results.get('status') in ['RUNNING', 'READY']:
+                # Still running
+                return jsonify({
+                    "status": "in_progress",
+                    "message": "Crawl is still in progress. Please check back in a few seconds."
+                }), 200
+            else:
+                # Failed for some reason
+                return jsonify({
+                    "status": "failed",
+                    "error": crawl_results.get('error', 'Unknown error')
+                }), 500
+        
+        # Crawl finished - process the results
+        domain = urlparse(crawl_results.get('domain', '')).netloc
+        content = crawl_results.get('content', '')
+        
+        if not content or len(content.split()) < 20:
+            return jsonify({
+                "status": "failed",
+                "error": "Not enough content crawled to classify domain."
+            }), 400
+        
+        # Classify domain
         classification = classifier.classify_domain(content, domain=domain)
         classification = ensure_serializable(classification)
         
@@ -199,10 +257,11 @@ def classify_domain():
                 reasoning = f"Classification method: {classification.get('detection_method', 'unknown')}"
         
         # Save to Snowflake
-        save_to_snowflake(domain, url, content, classification)
+        save_to_snowflake(domain, crawl_results.get('domain', ''), content, classification)
         
         # Return enhanced response with reasoning
         return jsonify({
+            "status": "complete",
             "domain": domain,
             "predicted_class": str(classification['predicted_class']),
             "confidence_score": float(classification['max_confidence']),
@@ -210,9 +269,129 @@ def classify_domain():
             "low_confidence": bool(classification['low_confidence']),
             "detection_method": str(classification['detection_method']),
             "reasoning": reasoning,
-            "source": "fresh"
+            "source": "fresh",
+            "pages_crawled": crawl_results.get('pages_crawled', 0)
         }), 200
 
+    except Exception as e:
+        logger.exception(f"Error in check-crawl: {str(e)}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+# Maintain the original classify-domain endpoint for backward compatibility
+@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
+def classify_domain():
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+        
+    data = request.get_json()
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    try:
+        # First check if we have a cached result
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme:
+            url = f"https://{url}"
+        
+        domain = parsed_url.netloc or url
+        existing_record = snowflake_conn.check_existing_classification(domain)
+        
+        if existing_record:
+            # Return cached result with the same format as before
+            logger.info(f"[Snowflake] Returning cached result for {domain}")
+            
+            # Extract fields from existing record
+            confidence_scores = {}
+            try:
+                if 'all_scores' in existing_record:
+                    confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+            except:
+                logger.warning(f"Could not parse all_scores for {domain}")
+                
+            llm_explanation = ""
+            try:
+                metadata = json.loads(existing_record.get('model_metadata', '{}'))
+                llm_explanation = metadata.get('llm_explanation', '')
+            except:
+                logger.warning(f"Could not parse model_metadata for {domain}")
+            
+            if llm_explanation:
+                reasoning = llm_explanation
+            else:
+                reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
+            
+            return jsonify({
+                "domain": domain,
+                "predicted_class": existing_record.get('company_type', 'Unknown'),
+                "confidence_score": existing_record.get('confidence_score', 0),
+                "confidence_scores": confidence_scores,
+                "low_confidence": existing_record.get('low_confidence', True),
+                "detection_method": existing_record.get('detection_method', 'unknown'),
+                "reasoning": reasoning,
+                "source": "cached" 
+            }), 200
+        
+        # If no cached result, start a crawl and wait for completion 
+        crawl_run_id = start_apify_crawl(url)
+        
+        # Poll for results with a maximum wait time of 60 seconds
+        max_wait_time = 60  # seconds
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait_time:
+            crawl_results = fetch_apify_results(crawl_run_id)
+            
+            if crawl_results.get('success'):
+                # Crawl completed successfully
+                content = crawl_results.get('content', '')
+                
+                # Classify the domain
+                classification = classifier.classify_domain(content, domain=domain)
+                classification = ensure_serializable(classification)
+                
+                # Generate reasoning
+                reasoning = classification.get('llm_explanation', '')
+                if not reasoning:
+                    scores = classification.get('confidence_scores', {})
+                    if scores:
+                        reasoning = f"Classification determined by confidence scores: "
+                        for cls, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                            reasoning += f"{cls}: {score:.2f}, "
+                    else:
+                        reasoning = f"Classification method: {classification.get('detection_method', 'unknown')}"
+                
+                # Save to Snowflake
+                save_to_snowflake(domain, url, content, classification)
+                
+                # Return the result in the original format
+                return jsonify({
+                    "domain": domain,
+                    "predicted_class": str(classification['predicted_class']),
+                    "confidence_score": float(classification['max_confidence']),
+                    "confidence_scores": classification.get('confidence_scores', {}),
+                    "low_confidence": bool(classification['low_confidence']),
+                    "detection_method": str(classification['detection_method']),
+                    "reasoning": reasoning,
+                    "source": "fresh"
+                }), 200
+            
+            elif crawl_results.get('status') in ['FAILED', 'ABORTED', 'TIMED-OUT', 'ERROR']:
+                # Crawl failed
+                return jsonify({
+                    "error": f"Crawl failed: {crawl_results.get('error', 'Unknown error')}"
+                }), 500
+            
+            # Still processing, wait and try again
+            time.sleep(5)
+        
+        # If we get here, we've timed out
+        return jsonify({
+            "error": "Classification timed out. Please try again or use the two-step process with /start-crawl and /check-crawl endpoints."
+        }), 504  # Gateway Timeout
+        
     except Exception as e:
         logger.exception(f"Error in classify-domain: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -267,11 +446,24 @@ def crawl_and_save():
     try:
         logger.info(f"Starting crawl for {url}")
         crawl_run_id = start_apify_crawl(url)
-        crawl_results = fetch_apify_results(crawl_run_id)
         
-        if not crawl_results['success']:
-            logger.error(f"Crawl failed: {crawl_results.get('error', 'Unknown error')}")
-            return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+        # Wait for crawl to complete with a longer timeout
+        max_wait_time = 120  # seconds
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait_time:
+            crawl_results = fetch_apify_results(crawl_run_id)
+            
+            if crawl_results.get('success'):
+                break
+                
+            if crawl_results.get('status') in ['FAILED', 'ABORTED', 'TIMED-OUT', 'ERROR']:
+                return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+                
+            time.sleep(5)
+            
+        if not crawl_results.get('success'):
+            return jsonify({"error": "Crawl timed out"}), 504
         
         content = crawl_results['content']
         logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
@@ -305,11 +497,6 @@ def crawl_and_save():
             detection_method=str(classification['detection_method'])
         )
         
-        if not success_class:
-            logger.error(f"ERROR saving classification to Snowflake: {error_class}")
-        else:
-            logger.info(f"SUCCESS saving classification to Snowflake for domain: {domain}")
-        
         # Build and sanitize response to ensure JSON serialization
         response_data = {
             "domain": domain,
@@ -337,7 +524,7 @@ def crawl_and_save():
         logger.exception(f"Error in crawl-and-save: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# Add a new endpoint to test LLM classification directly
+# Add a test endpoint to test LLM classification directly
 @app.route('/test-llm-classification', methods=['POST'])
 def test_llm_classification():
     data = request.get_json()
@@ -361,11 +548,6 @@ def test_llm_classification():
     except Exception as e:
         logger.exception(f"Error in test-llm-classification: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5005, debug=True, use_reloader=False)
-
-# Keep your existing crawl-and-save endpoint
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, debug=True, use_reloader=False)
