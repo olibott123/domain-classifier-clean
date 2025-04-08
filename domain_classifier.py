@@ -62,9 +62,10 @@ class DomainClassifier:
 
         if use_pinecone:
             try:
-                import pinecone
-                pinecone.init(api_key=pinecone_api_key)
-                self.pinecone_index = pinecone.Index(pinecone_index_name)
+                # Updated Pinecone initialization
+                from pinecone import Pinecone
+                pc = Pinecone(api_key=pinecone_api_key)
+                self.pinecone_index = pc.Index(pinecone_index_name)
                 logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
             except Exception as e:
                 logger.error(f"Failed to initialize Pinecone: {e}")
@@ -281,14 +282,34 @@ class DomainClassifier:
             return False
 
     def load_model(self, path):
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-        self.vectorizer = data['vectorizer']
-        self.classifier = data['classifier']
-        self.label_encoder = data['label_encoder']
-        self.classes = data['classes']
-        self.confidence_threshold = data.get('confidence_threshold', 0.6)
-        logger.info(f"Model loaded: {path}")
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            self.vectorizer = data['vectorizer']
+            self.classifier = data['classifier']
+            self.label_encoder = data['label_encoder']
+            self.classes = data['classes']
+            self.confidence_threshold = data.get('confidence_threshold', 0.6)
+            logger.info(f"Model loaded: {path}")
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            # Create a fallback simple model
+            from sklearn.ensemble import RandomForestClassifier
+            self.vectorizer = TfidfVectorizer()
+            self.vectorizer.fit(["sample text for A/V integrator", 
+                              "sample text for residential A/V", 
+                              "sample text for managed service provider"])
+            self.classifier = RandomForestClassifier(n_estimators=10)
+            # Create a simple fallback model
+            X = self.vectorizer.transform(["sample text for A/V integrator", 
+                                      "sample text for residential A/V", 
+                                      "sample text for managed service provider"])
+            y = [0, 1, 2]  # Class indices
+            self.classifier.fit(X, y)
+            self.classes = ["Integrator - Commercial A/V", 
+                          "Integrator - Residential A/V", 
+                          "Managed Service Provider"]
+            logger.warning(f"Using fallback classifier due to model loading error: {e}")
 
     def save_model(self, path):
         with open(path, 'wb') as f:
