@@ -1,187 +1,198 @@
-import snowflake.connector
-import traceback
-import logging
 import os
+import re
+import logging
+import pickle
+import json
+import numpy as np
+from datetime import datetime
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SnowflakeConnector:
-    def __init__(self):
-        self.conn_params = {
-            'user': 'url_domain_crawler_testing_user',
-            'private_key_path': '/workspace/rsa_key.der',  # Updated path
-            'account': 'DOMOTZ-MAIN',
-            'warehouse': 'TESTING_WH',
-            'database': 'DOMOTZ_TESTING_SOURCE',
-            'schema': 'EXTERNAL_PUSH',
-            'authenticator': 'snowflake_jwt',
-            'session_parameters': {'QUERY_TAG': 'WebCrawlerBot'}
-        }
+# Defer importing scikit-learn to prevent startup errors
+# from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.ensemble import RandomForestClassifier
+# from sklearn.preprocessing import LabelEncoder
 
-    def load_private_key(self, path):
-        try:
-            with open(path, "rb") as key_file:
-                return key_file.read()
-        except Exception as e:
-            logger.error(f"Error loading private key from {path}: {e}")
-            # Try fallback path
-            fallback_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rsa_key.der')
-            logger.info(f"Trying fallback path: {fallback_path}")
+try:
+    import nltk
+    from nltk.corpus import stopwords
+    STOPWORDS = set(stopwords.words('english'))
+    HAS_STOPWORDS = True
+except:
+    STOPWORDS = set()
+    HAS_STOPWORDS = False
+
+class DomainClassifier:
+    def __init__(
+        self,
+        model_path=None,
+        use_pinecone=False,
+        pinecone_api_key=None,
+        pinecone_index_name=None,
+        confidence_threshold=0.6,
+        use_llm=False,
+        anthropic_api_key=None,
+        llm_model="claude-3-haiku-20240307"
+    ):
+        pinecone_api_key = pinecone_api_key or os.environ.get('PINECONE_API_KEY')
+        anthropic_api_key = anthropic_api_key or os.environ.get('ANTHROPIC_API_KEY')
+
+        # Check if API keys are present
+        if use_pinecone and not pinecone_api_key:
+            logger.error("Pinecone API key is missing")
+            use_pinecone = False
+
+        if use_llm and not anthropic_api_key:
+            logger.error("Anthropic API key is missing")
+            use_llm = False
+
+        self.vectorizer = None
+        self.classifier = None
+        self.label_encoder = None
+        self.classes = ["Integrator - Commercial A/V", "Integrator - Residential A/V", "Managed Service Provider"]
+        self.confidence_threshold = confidence_threshold
+        self.use_pinecone = use_pinecone
+        self.pinecone_index = None
+        self._using_fallback = True
+
+        # LLM integration
+        self.use_llm = use_llm
+        self.llm_classifier = None
+        if use_llm and anthropic_api_key:
+            # Defer import to avoid startup errors
+            from llm_classifier import LLMClassifier
+            self.llm_classifier = LLMClassifier(api_key=anthropic_api_key, model=llm_model)
+            logger.info(f"Initialized LLM classifier with model: {llm_model}")
+
+        if use_pinecone:
             try:
-                with open(fallback_path, "rb") as key_file:
-                    return key_file.read()
-            except Exception as fallback_e:
-                logger.error(f"Fallback path also failed: {fallback_e}")
-                raise
+                # Updated Pinecone initialization
+                from pinecone import Pinecone
+                pc = Pinecone(api_key=pinecone_api_key)
+                self.pinecone_index = pc.Index(pinecone_index_name)
+                logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Pinecone: {e}")
+                self.use_pinecone = False
 
-    def get_connection(self):
-        try:
-            private_key = self.load_private_key(self.conn_params['private_key_path'])
-            return snowflake.connector.connect(
-                user=self.conn_params['user'],
-                account=self.conn_params['account'],
-                private_key=private_key,
-                warehouse=self.conn_params['warehouse'],
-                database=self.conn_params['database'],
-                schema=self.conn_params['schema'],
-                authenticator=self.conn_params['authenticator'],
-                session_parameters=self.conn_params['session_parameters']
-            )
-        except Exception as e:
-            logger.error(f"Error connecting to Snowflake: {e}")
-            # For now, return None instead of raising to allow API to function without Snowflake
-            return None
+        if model_path:
+            self.load_model(model_path)
 
-    def save_domain_content(self, domain, url, content):
-        try:
-            conn = self.get_connection()
-            if not conn:
-                logger.warning("Snowflake connection failed - skipping domain content save")
-                return False, "Connection failed"
-                
-            cursor = conn.cursor()
-            
-            # Check if content already exists
-            cursor.execute("""
-                SELECT COUNT(*) FROM DOMAIN_CONTENT WHERE domain = %s
-            """, (domain,))
-            
-            if cursor.fetchone()[0] == 0:
-                logger.info(f"Inserting new domain content for {domain}")
-                cursor.execute("""
-                    INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
-                """, (domain, url, content))
-                conn.commit()
-                logger.info(f"Successfully saved domain content for {domain}")
-            else:
-                logger.info(f"Content for domain {domain} already exists, skipping insertion")
-                
-            cursor.close()
-            conn.close()
-            return True, None
-        except Exception as e:
-            error_msg = traceback.format_exc()
-            logger.error(f"Error saving domain content: {error_msg}")
-            return False, error_msg
+    # Rest of your DomainClassifier class...
+    # (keep all other methods the same)
 
-    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
+    def load_model(self, path):
         try:
-            logger.info(f"Attempting to save classification for {domain}: {company_type} ({confidence_score})")
-            conn = self.get_connection()
-            if not conn:
-                logger.warning("Snowflake connection failed - skipping classification save")
-                return False, "Connection failed"
-                
-            cursor = conn.cursor()
+            # Try to load scikit-learn here
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.ensemble import RandomForestClassifier
             
-            insert_query = """
-                INSERT INTO DOMAIN_CLASSIFICATION (
-                    DOMAIN, 
-                    COMPANY_TYPE, 
-                    CONFIDENCE_SCORE, 
-                    ALL_SCORES, 
-                    LOW_CONFIDENCE, 
-                    DETECTION_METHOD, 
-                    MODEL_METADATA, 
-                    CLASSIFICATION_DATE
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP())
-            """
-            
-            # Print the query parameters for debugging
-            params = (domain, company_type, confidence_score, all_scores, low_confidence, detection_method, model_metadata)
-            logger.info(f"Insert parameters: {params}")
-            
-            cursor.execute(insert_query, params)
-            conn.commit()
-            
-            # Verify the insert was successful
-            cursor.execute("SELECT COUNT(*) FROM DOMAIN_CLASSIFICATION WHERE DOMAIN = %s", (domain,))
-            count = cursor.fetchone()[0]
-            logger.info(f"After insert, found {count} records for domain {domain}")
-            
-            cursor.close()
-            conn.close()
-            logger.info(f"Successfully saved classification for {domain}")
-            return True, None
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            self.vectorizer = data['vectorizer']
+            self.classifier = data['classifier']
+            self.label_encoder = data.get('label_encoder')
+            self.classes = data['classes']
+            self.confidence_threshold = data.get('confidence_threshold', 0.6)
+            self._using_fallback = False
+            logger.info(f"Model loaded: {path}")
         except Exception as e:
-            error_msg = traceback.format_exc()
-            logger.error(f"Error saving classification: {error_msg}")
-            return False, error_msg
+            logger.error(f"Error loading model: {e}")
+            # Create a fallback simple model
+            self._using_fallback = True
             
-    def check_existing_classification(self, domain):
-        try:
-            logger.info(f"Checking for existing classification for domain: {domain}")
-            conn = self.get_connection()
-            if not conn:
-                logger.warning("Snowflake connection failed - skipping existence check")
-                return None
+            # Don't try to create a TfidfVectorizer - just use a dummy implementation
+            logger.warning(f"Using fallback classifier due to model loading error: {e}")
+    
+    def classify_domain(self, domain_content, domain=None):
+        """
+        Modified to prioritize LLM classification when the ML model fails to load
+        """
+        processed_text = self.preprocess_text(domain_content)
+        
+        if len(processed_text.split()) < 20:
+            logger.warning(f"[{domain}] Content too short, skipping.")
+            return {
+                "predicted_class": "Unknown",
+                "confidence_scores": {},
+                "max_confidence": 0.0,
+                "low_confidence": True,
+                "detection_method": "content_length_check"
+            }
+            
+        # If using fallback mode, rely on LLM classification
+        if self._using_fallback or not self.classifier:
+            logger.info(f"Using LLM-only classification for {domain}")
+            if not self.use_llm or not self.llm_classifier:
+                # If LLM is also not available, use a basic heuristic classifier
+                logger.warning("Fallback ML model and LLM not available - using basic heuristic classification")
+                return self._basic_heuristic_classify(domain_content, domain)
                 
-            cursor = conn.cursor()
-            
-            query = """
-                SELECT 
-                    DOMAIN, 
-                    COMPANY_TYPE, 
-                    CONFIDENCE_SCORE, 
-                    ALL_SCORES,
-                    LOW_CONFIDENCE, 
-                    DETECTION_METHOD,
-                    MODEL_METADATA,
-                    CLASSIFICATION_DATE
-                FROM DOMAIN_CLASSIFICATION
-                WHERE DOMAIN = %s
-                ORDER BY CLASSIFICATION_DATE DESC
-                LIMIT 1
-            """
-            
-            cursor.execute(query, (domain,))
-            result = cursor.fetchone()
-            
-            if result:
-                logger.info(f"Found existing classification for {domain}: {result[1]}")
-                existing_record = {
-                    "domain": result[0],
-                    "company_type": result[1],
-                    "confidence_score": result[2],
-                    "all_scores": result[3] if len(result) > 3 else "{}",
-                    "low_confidence": result[4] if len(result) > 4 else True,
-                    "detection_method": result[5] if len(result) > 5 else "unknown",
-                    "model_metadata": result[6] if len(result) > 6 else "{}",
-                    "classification_date": str(result[7]) if len(result) > 7 else ""
-                }
-                cursor.close()
-                conn.close()
-                return existing_record
-            else:
-                logger.info(f"No existing classification found for {domain}")
-                cursor.close()
-                conn.close()
-                return None
-        except Exception as e:
-            error_msg = traceback.format_exc()
-            logger.error(f"Error checking existing classification: {error_msg}")
-            return None
+            # Get classification from LLM
+            try:
+                llm_result = self.llm_classifier.classify(domain_content, domain)
+                logger.info(f"LLM classification for {domain}: {llm_result['predicted_class']} ({llm_result['max_confidence']:.2f})")
+                
+                # Add necessary fields for compatibility
+                if "max_confidence" not in llm_result:
+                    confidence_scores = llm_result.get("confidence_scores", {})
+                    max_confidence = max(confidence_scores.values()) if confidence_scores else 0.7
+                    llm_result["max_confidence"] = max_confidence
+                    
+                if "low_confidence" not in llm_result:
+                    llm_result["low_confidence"] = llm_result["max_confidence"] < self.confidence_threshold
+                
+                llm_result["detection_method"] = "llm_classification_only"
+                return llm_result
+            except Exception as e:
+                logger.error(f"LLM classification failed: {e}")
+                return self._basic_heuristic_classify(domain_content, domain)
+        
+        # Normal flow continues here when ML model is available...
+        # ... (rest of your original classify_domain method)
+    
+    def _basic_heuristic_classify(self, content, domain=None):
+        """Simple keyword-based classification when all else fails"""
+        content = content.lower()
+        
+        # Simple keyword counting
+        av_commercial_keywords = ['commercial', 'conference room', 'office', 'corporate', 'business', 'digital signage']
+        av_residential_keywords = ['home theater', 'residential', 'home automation', 'smart home', 'living room']
+        msp_keywords = ['managed service', 'it service', 'network', 'cloud', 'technical support', 'helpdesk', 'cyber', 'server']
+        
+        commercial_score = sum(1 for kw in av_commercial_keywords if kw in content)
+        residential_score = sum(1 for kw in av_residential_keywords if kw in content)
+        msp_score = sum(1 for kw in msp_keywords if kw in content)
+        
+        total = commercial_score + residential_score + msp_score
+        if total == 0:
+            # No keywords found
+            return {
+                "predicted_class": "Unknown",
+                "confidence_scores": {
+                    "Integrator - Commercial A/V": 0.33,
+                    "Integrator - Residential A/V": 0.33,
+                    "Managed Service Provider": 0.34
+                },
+                "max_confidence": 0.34,
+                "low_confidence": True,
+                "detection_method": "basic_heuristic_no_matches"
+            }
+        
+        # Calculate normalized scores
+        scores = {
+            "Integrator - Commercial A/V": commercial_score / total,
+            "Integrator - Residential A/V": residential_score / total,
+            "Managed Service Provider": msp_score / total
+        }
+        
+        max_class = max(scores.items(), key=lambda x: x[1])
+        
+        return {
+            "predicted_class": max_class[0],
+            "confidence_scores": scores,
+            "max_confidence": max_class[1],
+            "low_confidence": max_class[1] < self.confidence_threshold,
+            "detection_method": "basic_heuristic_classification"
+        }
