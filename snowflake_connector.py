@@ -11,7 +11,7 @@ class SnowflakeConnector:
     def __init__(self):
         self.conn_params = {
             'user': 'url_domain_crawler_testing_user',
-            'private_key_path': 'rsa_key.der',  # Changed to use a local path in the application directory
+            'private_key_path': '/workspace/rsa_key.der',  # Changed to use a local path in the application directory
             'account': 'DOMOTZ-MAIN',
             'warehouse': 'TESTING_WH',
             'database': 'DOMOTZ_TESTING_SOURCE',
