@@ -1,6 +1,7 @@
 import snowflake.connector
 import traceback
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -10,7 +11,7 @@ class SnowflakeConnector:
     def __init__(self):
         self.conn_params = {
             'user': 'url_domain_crawler_testing_user',
-            'private_key_path': '/root/crawler_api/rsa_key.der',
+            'private_key_path': './rsa_key.der',  # Changed to use a local path in the application directory
             'account': 'DOMOTZ-MAIN',
             'warehouse': 'TESTING_WH',
             'database': 'DOMOTZ_TESTING_SOURCE',
@@ -20,25 +21,43 @@ class SnowflakeConnector:
         }
 
     def load_private_key(self, path):
-        with open(path, "rb") as key_file:
-            return key_file.read()
+        try:
+            with open(path, "rb") as key_file:
+                return key_file.read()
+        except Exception as e:
+            logger.error(f"Error loading private key from {path}: {e}")
+            # Try alternate path as fallback
+            alt_path = os.path.join(os.path.dirname(__file__), 'rsa_key.der')
+            logger.info(f"Trying alternate path: {alt_path}")
+            with open(alt_path, "rb") as key_file:
+                return key_file.read()
 
     def get_connection(self):
-        private_key = self.load_private_key(self.conn_params['private_key_path'])
-        return snowflake.connector.connect(
-            user=self.conn_params['user'],
-            account=self.conn_params['account'],
-            private_key=private_key,
-            warehouse=self.conn_params['warehouse'],
-            database=self.conn_params['database'],
-            schema=self.conn_params['schema'],
-            authenticator=self.conn_params['authenticator'],
-            session_parameters=self.conn_params['session_parameters']
-        )
+        try:
+            private_key = self.load_private_key(self.conn_params['private_key_path'])
+            return snowflake.connector.connect(
+                user=self.conn_params['user'],
+                account=self.conn_params['account'],
+                private_key=private_key,
+                warehouse=self.conn_params['warehouse'],
+                database=self.conn_params['database'],
+                schema=self.conn_params['schema'],
+                authenticator=self.conn_params['authenticator'],
+                session_parameters=self.conn_params['session_parameters']
+            )
+        except Exception as e:
+            logger.error(f"Error connecting to Snowflake: {e}")
+            # For now, return None instead of raising exception
+            # This will allow the API to continue working even without Snowflake
+            return None
 
     def save_domain_content(self, domain, url, content):
         try:
             conn = self.get_connection()
+            if not conn:
+                logger.warning("Snowflake connection failed - skipping domain content save")
+                return False, "Connection failed"
+                
             cursor = conn.cursor()
             
             # Check if content already exists
@@ -69,6 +88,10 @@ class SnowflakeConnector:
         try:
             logger.info(f"Attempting to save classification for {domain}: {company_type} ({confidence_score})")
             conn = self.get_connection()
+            if not conn:
+                logger.warning("Snowflake connection failed - skipping classification save")
+                return False, "Connection failed"
+                
             cursor = conn.cursor()
             
             insert_query = """
@@ -110,6 +133,10 @@ class SnowflakeConnector:
         try:
             logger.info(f"Checking for existing classification for domain: {domain}")
             conn = self.get_connection()
+            if not conn:
+                logger.warning("Snowflake connection failed - skipping existence check")
+                return None
+                
             cursor = conn.cursor()
             
             query = """
@@ -117,8 +144,10 @@ class SnowflakeConnector:
                     DOMAIN, 
                     COMPANY_TYPE, 
                     CONFIDENCE_SCORE, 
+                    ALL_SCORES,
                     LOW_CONFIDENCE, 
-                    DETECTION_METHOD, 
+                    DETECTION_METHOD,
+                    MODEL_METADATA,
                     CLASSIFICATION_DATE
                 FROM DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
@@ -135,9 +164,11 @@ class SnowflakeConnector:
                     "domain": result[0],
                     "company_type": result[1],
                     "confidence_score": result[2],
-                    "low_confidence": result[3],
-                    "detection_method": result[4],
-                    "classification_date": str(result[5])
+                    "all_scores": result[3] if len(result) > 3 else "{}",
+                    "low_confidence": result[4] if len(result) > 4 else True,
+                    "detection_method": result[5] if len(result) > 5 else "unknown",
+                    "model_metadata": result[6] if len(result) > 6 else "{}",
+                    "classification_date": str(result[7]) if len(result) > 7 else ""
                 }
                 cursor.close()
                 conn.close()
