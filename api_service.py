@@ -39,7 +39,7 @@ app.json_encoder = CustomJSONEncoder
 # Get API keys and settings from environment variables or use defaults
 APIFY_TASK_ID = os.environ.get("APIFY_TASK_ID", "z3plE6RoQ5W6SNLDe")
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "apify_api_o4flnhGKKSc2fg25q0mUTkcojjxO4n0xiBIv")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "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")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "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")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "pcsk_2zg2J9_Bhk5rbGSyfzqTEGCLw6V6EJi7yHCnwwiEJ6MyhQDC7ydGnknwVzf3a8S7rZYLsi")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
 
