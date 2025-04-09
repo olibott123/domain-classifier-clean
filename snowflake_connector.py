@@ -9,7 +9,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Defer importing scikit-learn to prevent startup errors
+# DO NOT import scikit-learn at module level
 # from sklearn.feature_extraction.text import TfidfVectorizer
 # from sklearn.ensemble import RandomForestClassifier
 # from sklearn.preprocessing import LabelEncoder
@@ -79,32 +79,40 @@ class DomainClassifier:
         if model_path:
             self.load_model(model_path)
 
-    # Rest of your DomainClassifier class...
-    # (keep all other methods the same)
+    def preprocess_text(self, text):
+        if not text:
+            return ""
+        text = text.lower()
+        text = re.sub(r'https?://\S+|www\.\S+', '', text)
+        text = re.sub(r'[^\w\s]', '', text)
+        text = re.sub(r'\d+', '', text)
+        tokens = text.split()
+        if HAS_STOPWORDS:
+            tokens = [token for token in tokens if token not in STOPWORDS]
+        return ' '.join(tokens)
 
     def load_model(self, path):
         try:
-            # Try to load scikit-learn here
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.ensemble import RandomForestClassifier
-            
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
-            self.vectorizer = data['vectorizer']
-            self.classifier = data['classifier']
-            self.label_encoder = data.get('label_encoder')
-            self.classes = data['classes']
-            self.confidence_threshold = data.get('confidence_threshold', 0.6)
-            self._using_fallback = False
-            logger.info(f"Model loaded: {path}")
+            # Try to load the model but handle errors gracefully
+            logger.info(f"Attempting to load model from {path}")
+            try:
+                with open(path, 'rb') as f:
+                    data = pickle.load(f)
+                self.vectorizer = data['vectorizer']
+                self.classifier = data['classifier']
+                self.label_encoder = data.get('label_encoder')
+                self.classes = data['classes']
+                self.confidence_threshold = data.get('confidence_threshold', 0.6)
+                self._using_fallback = False
+                logger.info(f"Model loaded successfully: {path}")
+            except Exception as e:
+                logger.error(f"Error loading model: {e}")
+                raise e
         except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            # Create a fallback simple model
+            logger.error(f"Using fallback classifier due to model loading error: {e}")
             self._using_fallback = True
-            
-            # Don't try to create a TfidfVectorizer - just use a dummy implementation
-            logger.warning(f"Using fallback classifier due to model loading error: {e}")
-    
+            # No need to create a TfidfVectorizer - just use a dummy implementation
+
     def classify_domain(self, domain_content, domain=None):
         """
         Modified to prioritize LLM classification when the ML model fails to load
@@ -132,7 +140,7 @@ class DomainClassifier:
             # Get classification from LLM
             try:
                 llm_result = self.llm_classifier.classify(domain_content, domain)
-                logger.info(f"LLM classification for {domain}: {llm_result['predicted_class']} ({llm_result['max_confidence']:.2f})")
+                logger.info(f"LLM classification for {domain}: {llm_result['predicted_class']} ({llm_result.get('max_confidence', 0.7):.2f})")
                 
                 # Add necessary fields for compatibility
                 if "max_confidence" not in llm_result:
@@ -149,8 +157,9 @@ class DomainClassifier:
                 logger.error(f"LLM classification failed: {e}")
                 return self._basic_heuristic_classify(domain_content, domain)
         
-        # Normal flow continues here when ML model is available...
-        # ... (rest of your original classify_domain method)
+        # This shouldn't be reached with the fallback, but keeping for completeness
+        logger.warning("Using traditional ML classification (should not happen with fallback)")
+        return self._basic_heuristic_classify(domain_content, domain)
     
     def _basic_heuristic_classify(self, content, domain=None):
         """Simple keyword-based classification when all else fails"""
@@ -196,3 +205,31 @@ class DomainClassifier:
             "low_confidence": max_class[1] < self.confidence_threshold,
             "detection_method": "basic_heuristic_classification"
         }
+
+    def get_embedding(self, domain):
+        if not self.use_pinecone or not self.pinecone_index:
+            return None
+        try:
+            result = self.pinecone_index.fetch(ids=[domain])
+            if domain in result.vectors:
+                return np.array(result.vectors[domain].values)
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching embedding for {domain}: {e}")
+            return None
+
+    def store_embedding(self, domain, embedding, metadata=None):
+        if not self.use_pinecone or not self.pinecone_index:
+            logger.warning("Pinecone not configured properly.")
+            return False
+        if embedding is None:
+            logger.error(f"No embedding available to store for domain: {domain}")
+            return False
+        metadata = metadata or {}
+        try:
+            self.pinecone_index.upsert([(domain, embedding.tolist(), metadata)])
+            logger.info(f"Embedding stored in Pinecone for domain: {domain}")
+            return True
+        except Exception as e:
+            logger.error(f"Pinecone embedding storage error for {domain}: {e}")
+            return False
