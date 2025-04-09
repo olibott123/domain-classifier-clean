@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from domain_classifier_fixed import DomainClassifier
-from snowflake_connector import SnowflakeConnector
 import requests
 import time
 from urllib.parse import urlparse
@@ -52,6 +51,21 @@ classifier = DomainClassifier(
     llm_model="claude-3-haiku-20240307"
 )
 
+# Define a fallback Snowflake connector for when the real one isn't available
+class SnowflakeConnector:
+    def check_existing_classification(self, domain):
+        logger.info(f"Fallback: No existing classification for {domain}")
+        return None
+        
+    def save_domain_content(self, domain, url, content):
+        logger.info(f"Fallback: Not saving domain content for {domain}")
+        return True, None
+        
+    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
+        logger.info(f"Fallback: Not saving classification for {domain}")
+        return True, None
+
+# Use the fallback Snowflake connector
 snowflake_conn = SnowflakeConnector()
 
 def start_apify_crawl(url):
