@@ -71,9 +71,49 @@ class SnowflakeConnector:
 # Use the fallback Snowflake connector
 snowflake_conn = SnowflakeConnector()
 
-# Simple in-memory job storage
-job_results = {}
-job_status = defaultdict(lambda: "pending")
+# Create a directory for job results
+JOB_RESULTS_DIR = '/tmp/job_results'  # Using /tmp for persistent storage in containerized environments
+os.makedirs(JOB_RESULTS_DIR, exist_ok=True)
+
+def save_job_data(job_id, status, result=None):
+    """Save job status and optional result to file system"""
+    try:
+        # Create a dictionary with status and result
+        job_data = {
+            'status': status,
+            'timestamp': time.time()
+        }
+        
+        if result is not None:
+            job_data['result'] = result
+        
+        # Save to file
+        filepath = os.path.join(JOB_RESULTS_DIR, f"{job_id}.json")
+        with open(filepath, 'w') as f:
+            json.dump(job_data, f)
+            
+        logger.info(f"Saved job data for {job_id} to {filepath}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving job data for {job_id}: {e}")
+        return False
+
+def load_job_data(job_id):
+    """Load job data from file system"""
+    try:
+        filepath = os.path.join(JOB_RESULTS_DIR, f"{job_id}.json")
+        if not os.path.exists(filepath):
+            logger.info(f"No job data file found for {job_id}")
+            return None
+            
+        with open(filepath, 'r') as f:
+            job_data = json.load(f)
+            
+        logger.info(f"Loaded job data for {job_id} from {filepath}")
+        return job_data
+    except Exception as e:
+        logger.error(f"Error loading job data for {job_id}: {e}")
+        return None
 
 def start_apify_crawl(url):
     """Start a crawl of the specified URL using Apify."""
@@ -140,6 +180,9 @@ def ensure_serializable(obj):
 def background_crawl_and_classify(job_id, url):
     """Run the crawl and classify process in the background"""
     try:
+        # Save initial job status
+        save_job_data(job_id, "pending")
+        
         # Parse domain from URL
         parsed_url = urlparse(url)
         if not parsed_url.scheme:
@@ -173,7 +216,7 @@ def background_crawl_and_classify(job_id, url):
             else:
                 reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
             
-            # Store result and update status
+            # Prepare result
             result = {
                 "domain": domain,
                 "predicted_class": existing_record.get('company_type', 'Unknown'),
@@ -185,14 +228,16 @@ def background_crawl_and_classify(job_id, url):
                 "source": "cached"
             }
             
-            job_results[job_id] = result
-            job_status[job_id] = "completed"
-            logger.info(f"Background job {job_id}: Returned cached result")
+            # Store result in file system
+            save_job_data(job_id, "completed", result)
             return
         
         # Start the crawl
         logger.info(f"Background job {job_id}: Starting crawl for {url}")
         crawl_run_id = start_apify_crawl(url)
+        
+        # Update job status to "crawling"
+        save_job_data(job_id, "crawling")
         
         # Wait for crawl to complete
         while True:
@@ -202,8 +247,7 @@ def background_crawl_and_classify(job_id, url):
                 break
                 
             if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
-                job_status[job_id] = "failed"
-                job_results[job_id] = {"error": crawl_results.get('error', 'Unknown error')}
+                save_job_data(job_id, "failed", {"error": crawl_results.get('error', 'Unknown error')})
                 return
                 
             time.sleep(5)
@@ -211,6 +255,9 @@ def background_crawl_and_classify(job_id, url):
         # Process the crawl results
         content = crawl_results.get('content', '')
         logger.info(f"Background job {job_id}: Crawl completed for {domain}, got {len(content)} characters of content")
+        
+        # Update job status to "classifying"
+        save_job_data(job_id, "classifying")
         
         # Classify the domain
         classification = classifier.classify_domain(content, domain=domain)
@@ -240,7 +287,7 @@ def background_crawl_and_classify(job_id, url):
         except Exception as e:
             logger.error(f"Background job {job_id}: Error saving to Snowflake: {e}")
         
-        # Prepare response
+        # Prepare result
         result = {
             "domain": domain,
             "predicted_class": str(classification['predicted_class']),
@@ -252,15 +299,13 @@ def background_crawl_and_classify(job_id, url):
             "source": "fresh"
         }
         
-        # Store result and update status
-        job_results[job_id] = result
-        job_status[job_id] = "completed"
-        logger.info(f"Background job {job_id}: Classification completed")
+        # Store result in file system
+        save_job_data(job_id, "completed", result)
+        logger.info(f"Background job {job_id}: Classification completed and saved")
         
     except Exception as e:
         logger.exception(f"Background job {job_id}: Error in background process: {str(e)}")
-        job_status[job_id] = "failed"
-        job_results[job_id] = {"error": str(e)}
+        save_job_data(job_id, "failed", {"error": str(e)})
 
 @app.route('/start-classification', methods=['POST', 'OPTIONS'])
 def start_classification():
@@ -292,18 +337,25 @@ def start_classification():
 @app.route('/check-classification/<job_id>', methods=['GET'])
 def check_classification(job_id):
     """Check the status of a classification job"""
-    status = job_status.get(job_id, "not_found")
+    # Load job data from file system
+    job_data = load_job_data(job_id)
     
-    if status == "not_found":
+    if job_data is None:
         return jsonify({"error": "Job not found"}), 404
     
+    status = job_data.get('status')
+    
     if status == "completed":
-        return jsonify(job_results[job_id]), 200
+        # Return the completed result
+        return jsonify(job_data.get('result')), 200
     
     if status == "failed":
-        return jsonify({"error": "Job failed", "details": job_results.get(job_id, {})}), 500
+        # Return error information
+        error_details = job_data.get('result', {})
+        return jsonify({"error": "Job failed", "details": error_details}), 500
     
-    return jsonify({"status": status, "message": "Job is still processing"}), 200
+    # Job is still in progress
+    return jsonify({"status": status, "message": f"Job is {status}"}), 202
 
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
@@ -330,9 +382,11 @@ def classify_domain():
         # Wait briefly to see if we can get a cached result quickly
         time.sleep(2)
         
-        if job_status[job_id] == "completed":
+        # Check if job has completed
+        job_data = load_job_data(job_id)
+        if job_data and job_data.get('status') == "completed":
             # We got a result quickly (likely cached)
-            return jsonify(job_results[job_id]), 200
+            return jsonify(job_data.get('result')), 200
         
         # If we're still processing, return a 202 Accepted with the job ID
         return jsonify({
