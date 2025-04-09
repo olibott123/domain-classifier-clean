@@ -406,5 +406,16 @@ def test_llm_classification():
         logger.exception(f"Error in test-llm-classification: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Simple health check endpoint to verify the API is running"""
+    return jsonify({
+        "status": "ok",
+        "numpy_version": np.__version__,
+        "model_fallback": getattr(classifier, '_using_fallback', True),
+        "llm_available": hasattr(classifier, 'llm_classifier') and classifier.llm_classifier is not None,
+        "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None
+    }), 200
+    
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5005)), debug=False, use_reloader=False)
