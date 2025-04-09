@@ -84,8 +84,8 @@ def fetch_apify_results(run_id, timeout=300, interval=10):
             data = response.json()
             
             if data:
-                combined_text = ' '.join(item['text'] for item in data if item.get('text'))
-                domain_url = data[0].get('url', '')
+                combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
+                domain_url = data[0].get('url', '') if data else ''
                 return {
                     'success': True,
                     'domain': domain_url,
@@ -146,16 +146,16 @@ def classify_domain():
             try:
                 if 'all_scores' in existing_record:
                     confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
-            except:
-                logger.warning(f"Could not parse all_scores for {domain}")
+            except Exception as e:
+                logger.warning(f"Could not parse all_scores for {domain}: {e}")
                 
             # Try to extract LLM explanation
             llm_explanation = ""
             try:
                 metadata = json.loads(existing_record.get('model_metadata', '{}'))
                 llm_explanation = metadata.get('llm_explanation', '')
-            except:
-                logger.warning(f"Could not parse model_metadata for {domain}")
+            except Exception as e:
+                logger.warning(f"Could not parse model_metadata for {domain}: {e}")
             
             # Generate a reasoning text based on available data
             if llm_explanation:
@@ -227,8 +227,8 @@ def classify_domain():
                     "predicted_class": str(classification['predicted_class']),
                     "confidence_score": float(classification['max_confidence']),
                     "confidence_scores": classification.get('confidence_scores', {}),
-                    "low_confidence": bool(classification['low_confidence']),
-                    "detection_method": str(classification['detection_method']),
+                    "low_confidence": bool(classification.get('low_confidence', False)),
+                    "detection_method": str(classification.get('detection_method', 'unknown')),
                     "reasoning": reasoning,
                     "source": "fresh"
                 }), 200
@@ -270,10 +270,10 @@ def save_to_snowflake(domain, url, content, classification):
             domain=domain,
             company_type=str(classification['predicted_class']),
             confidence_score=float(classification['max_confidence']),
-            all_scores=json.dumps(classification['confidence_scores']),
+            all_scores=json.dumps(classification.get('confidence_scores', {})),
             model_metadata=json.dumps(model_metadata),
-            low_confidence=bool(classification['low_confidence']),
-            detection_method=str(classification['detection_method'])
+            low_confidence=bool(classification.get('low_confidence', False)),
+            detection_method=str(classification.get('detection_method', 'unknown'))
         )
         return True
     except Exception as e:
@@ -290,7 +290,7 @@ def crawl_and_save():
     parsed_url = urlparse(url)
     if not parsed_url.scheme:
         url = f"https://{url}"
-    domain = urlparse(url).netloc
+    domain = parsed_url.netloc
     
     # Check existing records in Snowflake
     existing_record = snowflake_conn.check_existing_classification(domain)
@@ -348,10 +348,10 @@ def crawl_and_save():
             domain=domain,
             company_type=str(classification['predicted_class']),
             confidence_score=float(classification['max_confidence']),
-            all_scores=json.dumps(classification['confidence_scores']),
+            all_scores=json.dumps(classification.get('confidence_scores', {})),
             model_metadata=json.dumps(model_metadata),
-            low_confidence=bool(classification['low_confidence']),
-            detection_method=str(classification['detection_method'])
+            low_confidence=bool(classification.get('low_confidence', False)),
+            detection_method=str(classification.get('detection_method', 'unknown'))
         )
         
         # Build and sanitize response to ensure JSON serialization
@@ -359,10 +359,10 @@ def crawl_and_save():
             "domain": domain,
             "classification": {
                 "predicted_class": str(classification['predicted_class']),
-                "confidence_scores": {k: float(v) for k, v in classification['confidence_scores'].items()},
+                "confidence_scores": {k: float(v) for k, v in classification.get('confidence_scores', {}).items()},
                 "max_confidence": float(classification['max_confidence']),
-                "low_confidence": bool(classification['low_confidence']),
-                "detection_method": str(classification['detection_method']),
+                "low_confidence": bool(classification.get('low_confidence', False)),
+                "detection_method": str(classification.get('detection_method', 'unknown')),
                 "llm_explanation": str(classification.get('llm_explanation', ''))
             },
             "snowflake": {
@@ -407,4 +407,4 @@ def test_llm_classification():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5005, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5005)), debug=False, use_reloader=False)
