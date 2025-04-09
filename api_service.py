@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from domain_classifier import DomainClassifier
+from domain_classifier_fixed import DomainClassifier
 from snowflake_connector import SnowflakeConnector
 import requests
 import time
