@@ -11,7 +11,7 @@ class SnowflakeConnector:
     def __init__(self):
         self.conn_params = {
             'user': 'url_domain_crawler_testing_user',
-            'private_key_path': '/workspace/rsa_key.der',  # Changed to use a local path in the application directory
+            'private_key_path': '/workspace/rsa_key.der',  # Updated path
             'account': 'DOMOTZ-MAIN',
             'warehouse': 'TESTING_WH',
             'database': 'DOMOTZ_TESTING_SOURCE',
@@ -26,11 +26,15 @@ class SnowflakeConnector:
                 return key_file.read()
         except Exception as e:
             logger.error(f"Error loading private key from {path}: {e}")
-            # Try alternate path as fallback
-            alt_path = os.path.join(os.path.dirname(__file__), 'rsa_key.der')
-            logger.info(f"Trying alternate path: {alt_path}")
-            with open(alt_path, "rb") as key_file:
-                return key_file.read()
+            # Try fallback path
+            fallback_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rsa_key.der')
+            logger.info(f"Trying fallback path: {fallback_path}")
+            try:
+                with open(fallback_path, "rb") as key_file:
+                    return key_file.read()
+            except Exception as fallback_e:
+                logger.error(f"Fallback path also failed: {fallback_e}")
+                raise
 
     def get_connection(self):
         try:
@@ -47,8 +51,7 @@ class SnowflakeConnector:
             )
         except Exception as e:
             logger.error(f"Error connecting to Snowflake: {e}")
-            # For now, return None instead of raising exception
-            # This will allow the API to continue working even without Snowflake
+            # For now, return None instead of raising to allow API to function without Snowflake
             return None
 
     def save_domain_content(self, domain, url, content):
