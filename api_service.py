@@ -433,11 +433,27 @@ def check_status(job_id):
     }), 202
 
 # Add this endpoint for backward compatibility with existing frontend code
+# Add these two functions at the end of your check-classification endpoint handler
 @app.route('/check-classification/<job_id>', methods=['GET'])
 def check_classification(job_id):
     """Alias for check-status to maintain backward compatibility"""
-    return check_status(job_id)
-
+    # Load the job result
+    result = load_job_result(job_id)
+    
+    if result is None:
+        return jsonify({"status": "processing", "message": "Job is still processing"}), 202
+    
+    if result.get('status') == 'completed':
+        return jsonify(result), 200
+    
+    if result.get('status') == 'failed':
+        return jsonify({"error": result.get('error', 'Unknown error')}), 500
+    
+    # Still processing
+    return jsonify({
+        "status": result.get('status', 'processing'),
+        "message": "Job is still processing"
+    }), 202
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     """Main endpoint that now uses the two-step process but maintains the original API interface"""
