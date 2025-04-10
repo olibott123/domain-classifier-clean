@@ -168,7 +168,7 @@ def classify_domain():
         return '', 204
     
     try:
-        data = request.get_json()
+        data = request.json
         url = data.get('url', '').strip()
         force_reclassify = data.get('force_reclassify', False)
         
@@ -230,9 +230,13 @@ def classify_domain():
         
         # If reclassifying, try to get existing content first
         if force_reclassify:
-            content = snowflake_conn.get_domain_content(domain)
-            if content:
-                logger.info(f"Using existing content for {domain}")
+            try:
+                content = snowflake_conn.get_domain_content(domain)
+                if content:
+                    logger.info(f"Using existing content for {domain}")
+            except (AttributeError, Exception) as e:
+                logger.warning(f"Could not get existing content, will crawl instead: {e}")
+                content = None
         
         # If no content yet, crawl the website
         if not content:
@@ -263,6 +267,14 @@ def classify_domain():
                 "error": "Classification failed",
                 "company_type": "Unknown"
             }), 500
+        
+        # Ensure predicted_class matches highest confidence score
+        if "confidence_scores" in classification:
+            confidence_scores = classification["confidence_scores"]
+            if confidence_scores:
+                max_class = max(confidence_scores.items(), key=lambda x: x[1])
+                classification["predicted_class"] = max_class[0]
+                classification["max_confidence"] = max_class[1]
         
         # Save to Snowflake (always save, even for reclassifications)
         save_to_snowflake(domain, url, content, classification)
