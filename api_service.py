@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from domain_classifier_fixed import DomainClassifier
+from snowflake_connector import SnowflakeConnector
 import requests
 import time
 from urllib.parse import urlparse
@@ -54,22 +55,28 @@ classifier = DomainClassifier(
     llm_model="claude-3-haiku-20240307"
 )
 
-# Define a fallback Snowflake connector for when the real one isn't available
-class SnowflakeConnector:
-    def check_existing_classification(self, domain):
-        logger.info(f"Fallback: No existing classification for {domain}")
-        return None
-        
-    def save_domain_content(self, domain, url, content):
-        logger.info(f"Fallback: Not saving domain content for {domain}")
-        return True, None
-        
-    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
-        logger.info(f"Fallback: Not saving classification for {domain}")
-        return True, None
-
-# Use the fallback Snowflake connector
-snowflake_conn = SnowflakeConnector()
+# Initialize Snowflake connector
+try:
+    snowflake_conn = SnowflakeConnector()
+    if not getattr(snowflake_conn, 'connected', False):
+        logger.warning("Snowflake connection failed, using fallback")
+except Exception as e:
+    logger.error(f"Error initializing Snowflake connector: {e}")
+    # Define a fallback Snowflake connector for when the real one isn't available
+    class FallbackSnowflakeConnector:
+        def check_existing_classification(self, domain):
+            logger.info(f"Fallback: No existing classification for {domain}")
+            return None
+            
+        def save_domain_content(self, domain, url, content):
+            logger.info(f"Fallback: Not saving domain content for {domain}")
+            return True, None
+            
+        def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
+            logger.info(f"Fallback: Not saving classification for {domain}")
+            return True, None
+    
+    snowflake_conn = FallbackSnowflakeConnector()
 
 # Simple in-memory storage
 # This is just for the current request
@@ -436,7 +443,8 @@ def health_check():
         "numpy_version": np.__version__,
         "model_fallback": getattr(classifier, '_using_fallback', True),
         "llm_available": hasattr(classifier, 'llm_classifier') and classifier.llm_classifier is not None,
-        "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None
+        "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None,
+        "snowflake_connected": getattr(snowflake_conn, 'connected', False)
     }), 200
     
 if __name__ == '__main__':
