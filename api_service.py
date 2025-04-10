@@ -432,6 +432,12 @@ def check_status(job_id):
         "message": "Job is still processing"
     }), 202
 
+# Add this endpoint for backward compatibility with existing frontend code
+@app.route('/check-classification/<job_id>', methods=['GET'])
+def check_classification(job_id):
+    """Alias for check-status to maintain backward compatibility"""
+    return check_status(job_id)
+
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     """Main endpoint that now uses the two-step process but maintains the original API interface"""
@@ -492,10 +498,11 @@ def save_to_snowflake(domain, url, content, classification):
             classification['max_confidence'] = max_confidence
 
         llm_explanation = classification.get('llm_explanation', '')
+        # Truncate the LLM explanation to prevent Snowflake errors (500 chars should be safe)
         model_metadata = {
             'model_version': '1.0',
             'llm_model': 'claude-3-haiku-20240307',
-            'llm_explanation': llm_explanation[:1000] if llm_explanation else ''
+            'llm_explanation': llm_explanation[:500] if llm_explanation else ''
         }
 
         snowflake_conn.save_classification(
@@ -527,4 +534,3 @@ def health_check():
     
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5005)), debug=False, use_reloader=False)
-
