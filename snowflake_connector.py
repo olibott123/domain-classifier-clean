@@ -1,235 +1,291 @@
 import os
-import re
-import logging
-import pickle
 import json
-import numpy as np
+import logging
+import time
 from datetime import datetime
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import load_der_private_key
+import snowflake.connector
+from snowflake.connector.errors import ProgrammingError, DatabaseError
 
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# DO NOT import scikit-learn at module level
-# from sklearn.feature_extraction.text import TfidfVectorizer
-# from sklearn.ensemble import RandomForestClassifier
-# from sklearn.preprocessing import LabelEncoder
-
-try:
-    import nltk
-    from nltk.corpus import stopwords
-    STOPWORDS = set(stopwords.words('english'))
-    HAS_STOPWORDS = True
-except:
-    STOPWORDS = set()
-    HAS_STOPWORDS = False
-
-class DomainClassifier:
-    def __init__(
-        self,
-        model_path=None,
-        use_pinecone=False,
-        pinecone_api_key=None,
-        pinecone_index_name=None,
-        confidence_threshold=0.6,
-        use_llm=False,
-        anthropic_api_key=None,
-        llm_model="claude-3-haiku-20240307"
-    ):
-        pinecone_api_key = pinecone_api_key or os.environ.get('PINECONE_API_KEY')
-        anthropic_api_key = anthropic_api_key or os.environ.get('ANTHROPIC_API_KEY')
-
-        # Check if API keys are present
-        if use_pinecone and not pinecone_api_key:
-            logger.error("Pinecone API key is missing")
-            use_pinecone = False
-
-        if use_llm and not anthropic_api_key:
-            logger.error("Anthropic API key is missing")
-            use_llm = False
-
-        self.vectorizer = None
-        self.classifier = None
-        self.label_encoder = None
-        self.classes = ["Integrator - Commercial A/V", "Integrator - Residential A/V", "Managed Service Provider"]
-        self.confidence_threshold = confidence_threshold
-        self.use_pinecone = use_pinecone
-        self.pinecone_index = None
-        self._using_fallback = True
-
-        # LLM integration
-        self.use_llm = use_llm
-        self.llm_classifier = None
-        if use_llm and anthropic_api_key:
-            # Defer import to avoid startup errors
-            from llm_classifier import LLMClassifier
-            self.llm_classifier = LLMClassifier(api_key=anthropic_api_key, model=llm_model)
-            logger.info(f"Initialized LLM classifier with model: {llm_model}")
-
-        if use_pinecone:
-            try:
-                # Updated Pinecone initialization
-                from pinecone import Pinecone
-                pc = Pinecone(api_key=pinecone_api_key)
-                self.pinecone_index = pc.Index(pinecone_index_name)
-                logger.info(f"Connected to Pinecone index: {pinecone_index_name}")
-            except Exception as e:
-                logger.error(f"Failed to initialize Pinecone: {e}")
-                self.use_pinecone = False
-
-        if model_path:
-            self.load_model(model_path)
-
-    def preprocess_text(self, text):
-        if not text:
-            return ""
-        text = text.lower()
-        text = re.sub(r'https?://\S+|www\.\S+', '', text)
-        text = re.sub(r'[^\w\s]', '', text)
-        text = re.sub(r'\d+', '', text)
-        tokens = text.split()
-        if HAS_STOPWORDS:
-            tokens = [token for token in tokens if token not in STOPWORDS]
-        return ' '.join(tokens)
-
-    def load_model(self, path):
-        try:
-            # Try to load the model but handle errors gracefully
-            logger.info(f"Attempting to load model from {path}")
-            try:
-                with open(path, 'rb') as f:
-                    data = pickle.load(f)
-                self.vectorizer = data['vectorizer']
-                self.classifier = data['classifier']
-                self.label_encoder = data.get('label_encoder')
-                self.classes = data['classes']
-                self.confidence_threshold = data.get('confidence_threshold', 0.6)
-                self._using_fallback = False
-                logger.info(f"Model loaded successfully: {path}")
-            except Exception as e:
-                logger.error(f"Error loading model: {e}")
-                raise e
-        except Exception as e:
-            logger.error(f"Using fallback classifier due to model loading error: {e}")
-            self._using_fallback = True
-            # No need to create a TfidfVectorizer - just use a dummy implementation
-
-    def classify_domain(self, domain_content, domain=None):
-        """
-        Modified to prioritize LLM classification when the ML model fails to load
-        """
-        processed_text = self.preprocess_text(domain_content)
+class SnowflakeConnector:
+    def __init__(self):
+        """Initialize Snowflake connection with environment variables."""
+        self.connected = False
         
-        if len(processed_text.split()) < 20:
-            logger.warning(f"[{domain}] Content too short, skipping.")
-            return {
-                "predicted_class": "Unknown",
-                "confidence_scores": {},
-                "max_confidence": 0.0,
-                "low_confidence": True,
-                "detection_method": "content_length_check"
+        # Get connection parameters from environment variables
+        self.account = os.environ.get('SNOWFLAKE_ACCOUNT')
+        self.user = os.environ.get('SNOWFLAKE_USER')
+        self.database = os.environ.get('SNOWFLAKE_DATABASE', 'DOMAIN_CLASSIFIER')
+        self.schema = os.environ.get('SNOWFLAKE_SCHEMA', 'PUBLIC')
+        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')
+        self.role = os.environ.get('SNOWFLAKE_ROLE', 'ACCOUNTADMIN')
+        
+        # Check for required credentials
+        if not self.account or not self.user:
+            logger.warning("Missing Snowflake credentials. Using fallback mode.")
+            return
+        
+        # Try to load private key for authentication
+        self.private_key_path = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH', '/workspace/rsa_key.der')
+        self.private_key_passphrase = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE')
+        
+        try:
+            self._init_connection()
+        except Exception as e:
+            logger.error(f"Failed to initialize Snowflake connection: {e}")
+            self.connected = False
+    
+    def _init_connection(self):
+        """Initialize the Snowflake connection."""
+        try:
+            # Prepare private key if it exists
+            private_key = None
+            if os.path.exists(self.private_key_path):
+                with open(self.private_key_path, 'rb') as key_file:
+                    private_key_data = key_file.read()
+                    private_key = load_der_private_key(
+                        private_key_data,
+                        password=self.private_key_passphrase.encode() if self.private_key_passphrase else None,
+                        backend=default_backend()
+                    )
+            
+            # Connect to Snowflake
+            conn_params = {
+                'user': self.user,
+                'account': self.account,
+                'database': self.database,
+                'schema': self.schema,
+                'warehouse': self.warehouse,
+                'role': self.role
             }
             
-        # If using fallback mode, rely on LLM classification
-        if self._using_fallback or not self.classifier:
-            logger.info(f"Using LLM-only classification for {domain}")
-            if not self.use_llm or not self.llm_classifier:
-                # If LLM is also not available, use a basic heuristic classifier
-                logger.warning("Fallback ML model and LLM not available - using basic heuristic classification")
-                return self._basic_heuristic_classify(domain_content, domain)
-                
-            # Get classification from LLM
-            try:
-                llm_result = self.llm_classifier.classify(domain_content, domain)
-                logger.info(f"LLM classification for {domain}: {llm_result['predicted_class']} ({llm_result.get('max_confidence', 0.7):.2f})")
-                
-                # Add necessary fields for compatibility
-                if "max_confidence" not in llm_result:
-                    confidence_scores = llm_result.get("confidence_scores", {})
-                    max_confidence = max(confidence_scores.values()) if confidence_scores else 0.7
-                    llm_result["max_confidence"] = max_confidence
-                    
-                if "low_confidence" not in llm_result:
-                    llm_result["low_confidence"] = llm_result["max_confidence"] < self.confidence_threshold
-                
-                llm_result["detection_method"] = "llm_classification_only"
-                return llm_result
-            except Exception as e:
-                logger.error(f"LLM classification failed: {e}")
-                return self._basic_heuristic_classify(domain_content, domain)
-        
-        # This shouldn't be reached with the fallback, but keeping for completeness
-        logger.warning("Using traditional ML classification (should not happen with fallback)")
-        return self._basic_heuristic_classify(domain_content, domain)
+            if private_key:
+                conn_params['private_key'] = private_key
+            
+            # Test connection
+            conn = snowflake.connector.connect(**conn_params)
+            cursor = conn.cursor()
+            cursor.execute("SELECT current_version()")
+            version = cursor.fetchone()[0]
+            logger.info(f"Connected to Snowflake. Version: {version}")
+            
+            # Create necessary tables if they don't exist
+            self._create_tables(cursor)
+            
+            cursor.close()
+            conn.close()
+            self.connected = True
+        except Exception as e:
+            logger.error(f"Error connecting to Snowflake: {e}")
+            self.connected = False
+            raise
     
-    def _basic_heuristic_classify(self, content, domain=None):
-        """Simple keyword-based classification when all else fails"""
-        content = content.lower()
-        
-        # Simple keyword counting
-        av_commercial_keywords = ['commercial', 'conference room', 'office', 'corporate', 'business', 'digital signage']
-        av_residential_keywords = ['home theater', 'residential', 'home automation', 'smart home', 'living room']
-        msp_keywords = ['managed service', 'it service', 'network', 'cloud', 'technical support', 'helpdesk', 'cyber', 'server']
-        
-        commercial_score = sum(1 for kw in av_commercial_keywords if kw in content)
-        residential_score = sum(1 for kw in av_residential_keywords if kw in content)
-        msp_score = sum(1 for kw in msp_keywords if kw in content)
-        
-        total = commercial_score + residential_score + msp_score
-        if total == 0:
-            # No keywords found
-            return {
-                "predicted_class": "Unknown",
-                "confidence_scores": {
-                    "Integrator - Commercial A/V": 0.33,
-                    "Integrator - Residential A/V": 0.33,
-                    "Managed Service Provider": 0.34
-                },
-                "max_confidence": 0.34,
-                "low_confidence": True,
-                "detection_method": "basic_heuristic_no_matches"
+    def _create_tables(self, cursor):
+        """Create necessary tables if they don't exist."""
+        try:
+            # Domain content table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS DOMAIN_CONTENT (
+                domain VARCHAR(255) PRIMARY KEY,
+                url VARCHAR(1000),
+                content VARCHAR(16777216),
+                last_crawled TIMESTAMP_LTZ
+            )
+            """)
+            
+            # Domain classification table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS DOMAIN_CLASSIFICATION (
+                domain VARCHAR(255) PRIMARY KEY,
+                company_type VARCHAR(255),
+                confidence_score FLOAT,
+                all_scores VARCHAR(16777216),
+                model_metadata VARCHAR(16777216),
+                low_confidence BOOLEAN,
+                detection_method VARCHAR(255),
+                classified_at TIMESTAMP_LTZ
+            )
+            """)
+            
+            logger.info("Created necessary tables in Snowflake")
+        except Exception as e:
+            logger.error(f"Error creating tables: {e}")
+            raise
+    
+    def _get_connection(self):
+        """Get a new Snowflake connection."""
+        if not self.connected:
+            logger.warning("Not connected to Snowflake")
+            return None
+            
+        try:
+            conn_params = {
+                'user': self.user,
+                'account': self.account,
+                'database': self.database,
+                'schema': self.schema,
+                'warehouse': self.warehouse,
+                'role': self.role
             }
-        
-        # Calculate normalized scores
-        scores = {
-            "Integrator - Commercial A/V": commercial_score / total,
-            "Integrator - Residential A/V": residential_score / total,
-            "Managed Service Provider": msp_score / total
-        }
-        
-        max_class = max(scores.items(), key=lambda x: x[1])
-        
-        return {
-            "predicted_class": max_class[0],
-            "confidence_scores": scores,
-            "max_confidence": max_class[1],
-            "low_confidence": max_class[1] < self.confidence_threshold,
-            "detection_method": "basic_heuristic_classification"
-        }
-
-    def get_embedding(self, domain):
-        if not self.use_pinecone or not self.pinecone_index:
+            
+            # Load private key if it exists
+            if os.path.exists(self.private_key_path):
+                with open(self.private_key_path, 'rb') as key_file:
+                    private_key_data = key_file.read()
+                    private_key = load_der_private_key(
+                        private_key_data,
+                        password=self.private_key_passphrase.encode() if self.private_key_passphrase else None,
+                        backend=default_backend()
+                    )
+                conn_params['private_key'] = private_key
+            
+            return snowflake.connector.connect(**conn_params)
+        except Exception as e:
+            logger.error(f"Error getting Snowflake connection: {e}")
             return None
+    
+    def check_existing_classification(self, domain):
+        """Check if a domain already has a classification in Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: No existing classification for {domain}")
+            return None
+            
+        conn = self._get_connection()
+        if not conn:
+            return None
+            
         try:
-            result = self.pinecone_index.fetch(ids=[domain])
-            if domain in result.vectors:
-                return np.array(result.vectors[domain].values)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    domain, 
+                    company_type, 
+                    confidence_score, 
+                    all_scores, 
+                    model_metadata, 
+                    low_confidence,
+                    detection_method
+                FROM DOMAIN_CLASSIFICATION 
+                WHERE domain = %s
+            """, (domain,))
+            
+            row = cursor.fetchone()
+            if row:
+                column_names = [desc[0].lower() for desc in cursor.description]
+                result = dict(zip(column_names, row))
+                logger.info(f"Found existing classification for {domain}: {result['company_type']}")
+                return result
+            
+            logger.info(f"No existing classification found for {domain}")
             return None
         except Exception as e:
-            logger.error(f"Error fetching embedding for {domain}: {e}")
+            logger.error(f"Error checking for existing classification: {e}")
             return None
-
-    def store_embedding(self, domain, embedding, metadata=None):
-        if not self.use_pinecone or not self.pinecone_index:
-            logger.warning("Pinecone not configured properly.")
-            return False
-        if embedding is None:
-            logger.error(f"No embedding available to store for domain: {domain}")
-            return False
-        metadata = metadata or {}
+        finally:
+            if conn:
+                conn.close()
+    
+    def save_domain_content(self, domain, url, content):
+        """Save domain content to Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: Not saving domain content for {domain}")
+            return True, None
+            
+        conn = self._get_connection()
+        if not conn:
+            return False, "Failed to connect to Snowflake"
+            
         try:
-            self.pinecone_index.upsert([(domain, embedding.tolist(), metadata)])
-            logger.info(f"Embedding stored in Pinecone for domain: {domain}")
-            return True
+            cursor = conn.cursor()
+            
+            # Check if domain already exists
+            cursor.execute("""
+                SELECT COUNT(*) FROM DOMAIN_CONTENT WHERE domain = %s
+            """, (domain,))
+            
+            count = cursor.fetchone()[0]
+            
+            if count > 0:
+                # Update existing record
+                cursor.execute("""
+                    UPDATE DOMAIN_CONTENT
+                    SET url = %s, content = %s, last_crawled = CURRENT_TIMESTAMP()
+                    WHERE domain = %s
+                """, (url, content, domain))
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO DOMAIN_CONTENT (domain, url, content, last_crawled)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
+                """, (domain, url, content))
+            
+            conn.commit()
+            logger.info(f"Saved domain content for {domain}")
+            return True, None
         except Exception as e:
-            logger.error(f"Pinecone embedding storage error for {domain}: {e}")
-            return False
+            if conn:
+                conn.rollback()
+            logger.error(f"Error saving domain content: {e}")
+            return False, str(e)
+        finally:
+            if conn:
+                conn.close()
+    
+    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
+        """Save domain classification to Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: Not saving classification for {domain}")
+            return True, None
+            
+        conn = self._get_connection()
+        if not conn:
+            return False, "Failed to connect to Snowflake"
+            
+        try:
+            cursor = conn.cursor()
+            
+            # Check if domain already exists
+            cursor.execute("""
+                SELECT COUNT(*) FROM DOMAIN_CLASSIFICATION WHERE domain = %s
+            """, (domain,))
+            
+            count = cursor.fetchone()[0]
+            
+            if count > 0:
+                # Update existing record
+                cursor.execute("""
+                    UPDATE DOMAIN_CLASSIFICATION
+                    SET company_type = %s, 
+                        confidence_score = %s, 
+                        all_scores = %s, 
+                        model_metadata = %s,
+                        low_confidence = %s,
+                        detection_method = %s,
+                        classified_at = CURRENT_TIMESTAMP()
+                    WHERE domain = %s
+                """, (company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, domain))
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO DOMAIN_CLASSIFICATION 
+                    (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classified_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP())
+                """, (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method))
+            
+            conn.commit()
+            logger.info(f"Saved classification for {domain}: {company_type}")
+            return True, None
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error saving classification: {e}")
+            return False, str(e)
+        finally:
+            if conn:
+                conn.close()
