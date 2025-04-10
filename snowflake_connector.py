@@ -1,8 +1,7 @@
 import os
 import json
 import logging
-import time
-from datetime import datetime
+import traceback
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import load_der_private_key
@@ -15,21 +14,39 @@ logger = logging.getLogger(__name__)
 
 class SnowflakeConnector:
     def __init__(self):
-        """Initialize Snowflake connection with environment variables or defaults."""
+        """Initialize Snowflake connection with environment variables."""
         self.connected = False
         
-        # Get connection parameters from environment variables or use defaults from your old code
-        self.account = os.environ.get('SNOWFLAKE_ACCOUNT', 'DOMOTZ-MAIN')
-        self.user = os.environ.get('SNOWFLAKE_USER', 'url_domain_crawler_testing_user')
-        self.database = os.environ.get('SNOWFLAKE_DATABASE', 'DOMOTZ_TESTING_SOURCE')
-        self.schema = os.environ.get('SNOWFLAKE_SCHEMA', 'EXTERNAL_PUSH')
-        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'TESTING_WH')
-        self.role = os.environ.get('SNOWFLAKE_ROLE', 'ACCOUNTADMIN')
-        self.authenticator = os.environ.get('SNOWFLAKE_AUTHENTICATOR', 'snowflake_jwt')
+        # Get connection parameters from environment variables
+        self.account = os.environ.get('SNOWFLAKE_ACCOUNT')
+        self.user = os.environ.get('SNOWFLAKE_USER')
+        self.database = os.environ.get('SNOWFLAKE_DATABASE')
+        self.schema = os.environ.get('SNOWFLAKE_SCHEMA')
+        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE')
+        self.authenticator = os.environ.get('SNOWFLAKE_AUTHENTICATOR')
+        self.private_key_path = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH')
         
-        # Try to load private key for authentication
-        self.private_key_path = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH', '/workspace/rsa_key.der')
-        self.private_key_passphrase = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE')
+        # Create RSA key file if it doesn't exist
+        if not os.path.exists(self.private_key_path) and 'SNOWFLAKE_KEY_BASE64' in os.environ:
+            try:
+                dir_path = os.path.dirname(self.private_key_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path)
+                    
+                with open(self.private_key_path, 'wb') as key_file:
+                    import base64
+                    key_data = base64.b64decode(os.environ.get('SNOWFLAKE_KEY_BASE64'))
+                    key_file.write(key_data)
+                    
+                os.chmod(self.private_key_path, 0o600)
+                logger.info(f"Created RSA key file at {self.private_key_path}")
+            except Exception as e:
+                logger.error(f"Failed to create RSA key file: {e}")
+        
+        # Check for required credentials
+        if not self.account or not self.user or not self.private_key_path:
+            logger.warning("Missing Snowflake credentials. Using fallback mode.")
+            return
         
         try:
             self._init_connection()
@@ -147,7 +164,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
-            cursor.execute("""
+            query = """
                 SELECT
                     DOMAIN,
                     COMPANY_TYPE,
@@ -161,7 +178,8 @@ class SnowflakeConnector:
                 WHERE DOMAIN = %s
                 ORDER BY CLASSIFICATION_DATE DESC
                 LIMIT 1
-            """, (domain,))
+            """
+            cursor.execute(query, (domain,))
             
             result = cursor.fetchone()
             if result:
@@ -174,7 +192,8 @@ class SnowflakeConnector:
             logger.info(f"No existing classification found for {domain}")
             return None
         except Exception as e:
-            logger.error(f"Error checking for existing classification: {e}")
+            error_msg = traceback.format_exc()
+            logger.error(f"Error checking existing classification: {error_msg}")
             return None
         finally:
             if conn:
@@ -218,10 +237,11 @@ class SnowflakeConnector:
             logger.info(f"Saved domain content for {domain}")
             return True, None
         except Exception as e:
+            error_msg = traceback.format_exc()
             if conn:
                 conn.rollback()
-            logger.error(f"Error saving domain content: {e}")
-            return False, str(e)
+            logger.error(f"Error saving domain content: {error_msg}")
+            return False, error_msg
         finally:
             if conn:
                 conn.close()
@@ -271,10 +291,11 @@ class SnowflakeConnector:
             logger.info(f"Saved classification for {domain}: {company_type}")
             return True, None
         except Exception as e:
+            error_msg = traceback.format_exc()
             if conn:
                 conn.rollback()
-            logger.error(f"Error saving classification: {e}")
-            return False, str(e)
+            logger.error(f"Error saving classification: {error_msg}")
+            return False, error_msg
         finally:
             if conn:
                 conn.close()
