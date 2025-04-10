@@ -179,6 +179,9 @@ class SnowflakeConnector:
             cursor = conn.cursor()
             
             # Insert new record - using the table structure with ID autoincrement
+            # We always insert a new record since the table has autoincrement ID as the primary key
+            logger.info(f"Inserting domain content for {domain}")
+            
             cursor.execute("""
                 INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
                 VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
@@ -210,7 +213,9 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Insert new record - using the table structure with ID autoincrement
+            # Always insert a new record since we're using ID as primary key (not domain)
+            logger.info(f"Inserting classification for {domain}: {company_type}, score: {confidence_score}")
+            
             cursor.execute("""
                 INSERT INTO DOMAIN_CLASSIFICATION 
                 (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classification_date)
