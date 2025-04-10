@@ -15,21 +15,17 @@ logger = logging.getLogger(__name__)
 
 class SnowflakeConnector:
     def __init__(self):
-        """Initialize Snowflake connection with environment variables."""
+        """Initialize Snowflake connection with environment variables or defaults."""
         self.connected = False
         
-        # Get connection parameters from environment variables
-        self.account = os.environ.get('SNOWFLAKE_ACCOUNT')
-        self.user = os.environ.get('SNOWFLAKE_USER')
-        self.database = os.environ.get('SNOWFLAKE_DATABASE', 'DOMAIN_CLASSIFIER')
-        self.schema = os.environ.get('SNOWFLAKE_SCHEMA', 'PUBLIC')
-        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')
+        # Get connection parameters from environment variables or use defaults from your old code
+        self.account = os.environ.get('SNOWFLAKE_ACCOUNT', 'DOMOTZ-MAIN')
+        self.user = os.environ.get('SNOWFLAKE_USER', 'url_domain_crawler_testing_user')
+        self.database = os.environ.get('SNOWFLAKE_DATABASE', 'DOMOTZ_TESTING_SOURCE')
+        self.schema = os.environ.get('SNOWFLAKE_SCHEMA', 'EXTERNAL_PUSH')
+        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'TESTING_WH')
         self.role = os.environ.get('SNOWFLAKE_ROLE', 'ACCOUNTADMIN')
-        
-        # Check for required credentials
-        if not self.account or not self.user:
-            logger.warning("Missing Snowflake credentials. Using fallback mode.")
-            return
+        self.authenticator = os.environ.get('SNOWFLAKE_AUTHENTICATOR', 'snowflake_jwt')
         
         # Try to load private key for authentication
         self.private_key_path = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH', '/workspace/rsa_key.der')
@@ -44,43 +40,30 @@ class SnowflakeConnector:
     def _init_connection(self):
         """Initialize the Snowflake connection."""
         try:
-            # Prepare private key if it exists
-            private_key = None
+            # Check if the RSA key exists
             if os.path.exists(self.private_key_path):
-                with open(self.private_key_path, 'rb') as key_file:
-                    private_key_data = key_file.read()
-                    private_key = load_der_private_key(
-                        private_key_data,
-                        password=self.private_key_passphrase.encode() if self.private_key_passphrase else None,
-                        backend=default_backend()
-                    )
-            
-            # Connect to Snowflake
-            conn_params = {
-                'user': self.user,
-                'account': self.account,
-                'database': self.database,
-                'schema': self.schema,
-                'warehouse': self.warehouse,
-                'role': self.role
-            }
-            
-            if private_key:
-                conn_params['private_key'] = private_key
-            
-            # Test connection
-            conn = snowflake.connector.connect(**conn_params)
-            cursor = conn.cursor()
-            cursor.execute("SELECT current_version()")
-            version = cursor.fetchone()[0]
-            logger.info(f"Connected to Snowflake. Version: {version}")
-            
-            # Create necessary tables if they don't exist
-            self._create_tables(cursor)
-            
-            cursor.close()
-            conn.close()
-            self.connected = True
+                logger.info(f"Found RSA key at {self.private_key_path}")
+                
+                # Test connection
+                conn = self.get_connection()
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT current_version()")
+                    version = cursor.fetchone()[0]
+                    logger.info(f"Connected to Snowflake. Version: {version}")
+                    
+                    # Create necessary tables if they don't exist
+                    self._create_tables(cursor)
+                    
+                    cursor.close()
+                    conn.close()
+                    self.connected = True
+                else:
+                    logger.error("Could not establish Snowflake connection")
+                    self.connected = False
+            else:
+                logger.warning(f"RSA key not found at {self.private_key_path}")
+                self.connected = False
         except Exception as e:
             logger.error(f"Error connecting to Snowflake: {e}")
             self.connected = False
@@ -94,8 +77,8 @@ class SnowflakeConnector:
             CREATE TABLE IF NOT EXISTS DOMAIN_CONTENT (
                 domain VARCHAR(255) PRIMARY KEY,
                 url VARCHAR(1000),
-                content VARCHAR(16777216),
-                last_crawled TIMESTAMP_LTZ
+                text_content VARCHAR(16777216),
+                crawl_date TIMESTAMP_LTZ
             )
             """)
             
@@ -109,7 +92,7 @@ class SnowflakeConnector:
                 model_metadata VARCHAR(16777216),
                 low_confidence BOOLEAN,
                 detection_method VARCHAR(255),
-                classified_at TIMESTAMP_LTZ
+                classification_date TIMESTAMP_LTZ
             )
             """)
             
@@ -118,34 +101,36 @@ class SnowflakeConnector:
             logger.error(f"Error creating tables: {e}")
             raise
     
-    def _get_connection(self):
+    def load_private_key(self, path):
+        """Load private key from path."""
+        try:
+            with open(path, "rb") as key_file:
+                return key_file.read()
+        except Exception as e:
+            logger.error(f"Error loading private key: {e}")
+            return None
+    
+    def get_connection(self):
         """Get a new Snowflake connection."""
-        if not self.connected:
-            logger.warning("Not connected to Snowflake")
+        if not os.path.exists(self.private_key_path):
+            logger.warning(f"Private key not found at {self.private_key_path}")
             return None
             
         try:
-            conn_params = {
-                'user': self.user,
-                'account': self.account,
-                'database': self.database,
-                'schema': self.schema,
-                'warehouse': self.warehouse,
-                'role': self.role
-            }
-            
-            # Load private key if it exists
-            if os.path.exists(self.private_key_path):
-                with open(self.private_key_path, 'rb') as key_file:
-                    private_key_data = key_file.read()
-                    private_key = load_der_private_key(
-                        private_key_data,
-                        password=self.private_key_passphrase.encode() if self.private_key_passphrase else None,
-                        backend=default_backend()
-                    )
-                conn_params['private_key'] = private_key
-            
-            return snowflake.connector.connect(**conn_params)
+            private_key = self.load_private_key(self.private_key_path)
+            if not private_key:
+                return None
+                
+            return snowflake.connector.connect(
+                user=self.user,
+                account=self.account,
+                private_key=private_key,
+                warehouse=self.warehouse,
+                database=self.database,
+                schema=self.schema,
+                authenticator=self.authenticator,
+                session_parameters={'QUERY_TAG': 'WebCrawlerBot'}
+            )
         except Exception as e:
             logger.error(f"Error getting Snowflake connection: {e}")
             return None
@@ -156,31 +141,35 @@ class SnowflakeConnector:
             logger.info(f"Fallback: No existing classification for {domain}")
             return None
             
-        conn = self._get_connection()
+        conn = self.get_connection()
         if not conn:
             return None
             
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT 
-                    domain, 
-                    company_type, 
-                    confidence_score, 
-                    all_scores, 
-                    model_metadata, 
-                    low_confidence,
-                    detection_method
-                FROM DOMAIN_CLASSIFICATION 
-                WHERE domain = %s
+                SELECT
+                    DOMAIN,
+                    COMPANY_TYPE,
+                    CONFIDENCE_SCORE,
+                    ALL_SCORES,
+                    MODEL_METADATA,
+                    LOW_CONFIDENCE,
+                    DETECTION_METHOD,
+                    CLASSIFICATION_DATE
+                FROM DOMAIN_CLASSIFICATION
+                WHERE DOMAIN = %s
+                ORDER BY CLASSIFICATION_DATE DESC
+                LIMIT 1
             """, (domain,))
             
-            row = cursor.fetchone()
-            if row:
-                column_names = [desc[0].lower() for desc in cursor.description]
-                result = dict(zip(column_names, row))
-                logger.info(f"Found existing classification for {domain}: {result['company_type']}")
-                return result
+            result = cursor.fetchone()
+            if result:
+                column_names = ["domain", "company_type", "confidence_score", "all_scores", 
+                                "model_metadata", "low_confidence", "detection_method", "classification_date"]
+                existing_record = dict(zip(column_names, result))
+                logger.info(f"Found existing classification for {domain}: {existing_record['company_type']}")
+                return existing_record
             
             logger.info(f"No existing classification found for {domain}")
             return None
@@ -197,7 +186,7 @@ class SnowflakeConnector:
             logger.info(f"Fallback: Not saving domain content for {domain}")
             return True, None
             
-        conn = self._get_connection()
+        conn = self.get_connection()
         if not conn:
             return False, "Failed to connect to Snowflake"
             
@@ -215,13 +204,13 @@ class SnowflakeConnector:
                 # Update existing record
                 cursor.execute("""
                     UPDATE DOMAIN_CONTENT
-                    SET url = %s, content = %s, last_crawled = CURRENT_TIMESTAMP()
+                    SET url = %s, text_content = %s, crawl_date = CURRENT_TIMESTAMP()
                     WHERE domain = %s
                 """, (url, content, domain))
             else:
                 # Insert new record
                 cursor.execute("""
-                    INSERT INTO DOMAIN_CONTENT (domain, url, content, last_crawled)
+                    INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
                     VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
                 """, (domain, url, content))
             
@@ -243,7 +232,7 @@ class SnowflakeConnector:
             logger.info(f"Fallback: Not saving classification for {domain}")
             return True, None
             
-        conn = self._get_connection()
+        conn = self.get_connection()
         if not conn:
             return False, "Failed to connect to Snowflake"
             
@@ -267,14 +256,14 @@ class SnowflakeConnector:
                         model_metadata = %s,
                         low_confidence = %s,
                         detection_method = %s,
-                        classified_at = CURRENT_TIMESTAMP()
+                        classification_date = CURRENT_TIMESTAMP()
                     WHERE domain = %s
                 """, (company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, domain))
             else:
                 # Insert new record
                 cursor.execute("""
                     INSERT INTO DOMAIN_CLASSIFICATION 
-                    (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classified_at)
+                    (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classification_date)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP())
                 """, (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method))
             
