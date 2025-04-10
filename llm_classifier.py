@@ -2,6 +2,7 @@ import requests
 import logging
 import json
 import time
+import re  # Add this import for regex functionality
 from typing import Dict, Any, List, Optional
 import os
 
@@ -140,7 +141,6 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                             # Look for structure with predicted_class and confidence_scores
                             try:
                                 # Try to find JSON-like structure in the response
-                                import re
                                 json_str = re.search(r'({.*"predicted_class".*})', text_content, re.DOTALL)
                                 
                                 if not json_str:
@@ -265,8 +265,6 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         }
         
         # Look for explicit confidence values
-        import re
-        
         # Check for Commercial A/V confidence
         commercial_match = re.search(r"commercial\s*a\/v.*?(\d+(?:\.\d+)?)%", text.lower())
         if not commercial_match:
