@@ -78,10 +78,41 @@ except Exception as e:
     
     snowflake_conn = FallbackSnowflakeConnector()
 
-# Simple in-memory storage
-# This is just for the current request
-job_status = {}
-job_results = {}
+# Create a directory for job storage
+JOB_DIR = '/workspace/jobs'
+os.makedirs(JOB_DIR, exist_ok=True)
+
+def save_job_status(job_id, status, result=None):
+    """Save job status and result to file"""
+    try:
+        job_data = {
+            "status": status,
+            "updated": time.time()
+        }
+        
+        if result is not None:
+            job_data["result"] = result
+            
+        with open(os.path.join(JOB_DIR, f"{job_id}.json"), 'w') as f:
+            json.dump(job_data, f)
+        
+        logger.info(f"Saved job status for {job_id}: {status}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving job status: {e}")
+        return False
+
+def get_job_status(job_id):
+    """Get job status and result from file"""
+    try:
+        job_file = os.path.join(JOB_DIR, f"{job_id}.json")
+        if os.path.exists(job_file):
+            with open(job_file, 'r') as f:
+                return json.load(f)
+        return None
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        return None
 
 def start_apify_crawl(url):
     """Start a crawl of the specified URL using Apify."""
@@ -146,11 +177,11 @@ def ensure_serializable(obj):
     else:
         return obj
 
-def background_crawl_and_classify(job_id, url):
-    """Run the crawl and classify process in the background"""
+def process_domain_async(job_id, url, force_reclassify=False):
+    """Process the domain classification in a background thread"""
     try:
-        # Update status
-        job_status[job_id] = "pending"
+        # Update job status
+        save_job_status(job_id, "processing")
         
         # Parse domain from URL
         parsed_url = urlparse(url)
@@ -158,150 +189,7 @@ def background_crawl_and_classify(job_id, url):
             url = f"https://{url}"
         domain = parsed_url.netloc or url
         
-        # Check existing records in Snowflake first
-        existing_record = snowflake_conn.check_existing_classification(domain)
-        if existing_record:
-            logger.info(f"Background job {job_id}: Found existing record for {domain}")
-            
-            # Try to parse all_scores if it exists
-            confidence_scores = {}
-            try:
-                if 'all_scores' in existing_record:
-                    confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
-            except Exception as e:
-                logger.warning(f"Could not parse all_scores for {domain}: {e}")
-                
-            # Try to extract LLM explanation
-            llm_explanation = ""
-            try:
-                metadata = json.loads(existing_record.get('model_metadata', '{}'))
-                llm_explanation = metadata.get('llm_explanation', '')
-            except Exception as e:
-                logger.warning(f"Could not parse model_metadata for {domain}: {e}")
-            
-            # Generate a reasoning text based on available data
-            if llm_explanation:
-                reasoning = llm_explanation
-            else:
-                reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
-            
-            # Prepare result
-            result = {
-                "domain": domain,
-                "predicted_class": existing_record.get('company_type', 'Unknown'),
-                "confidence_score": existing_record.get('confidence_score', 0),
-                "confidence_scores": confidence_scores,
-                "low_confidence": existing_record.get('low_confidence', True),
-                "detection_method": existing_record.get('detection_method', 'unknown'),
-                "reasoning": reasoning,
-                "source": "cached"
-            }
-            
-            # Store result in memory
-            job_results[job_id] = result
-            job_status[job_id] = "completed"
-            return
-        
-        # Start the crawl
-        logger.info(f"Background job {job_id}: Starting crawl for {url}")
-        crawl_run_id = start_apify_crawl(url)
-        
-        # Update status
-        job_status[job_id] = "crawling"
-        
-        # Wait for crawl to complete
-        while True:
-            crawl_results = fetch_apify_results(crawl_run_id)
-            
-            if crawl_results.get('success'):
-                break
-                
-            if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
-                job_status[job_id] = "failed"
-                job_results[job_id] = {"error": crawl_results.get('error', 'Unknown error')}
-                return
-                
-            time.sleep(5)
-        
-        # Process the crawl results
-        content = crawl_results.get('content', '')
-        logger.info(f"Background job {job_id}: Crawl completed for {domain}, got {len(content)} characters of content")
-        
-        # Update status
-        job_status[job_id] = "classifying"
-        
-        # Classify the domain
-        classification = classifier.classify_domain(content, domain=domain)
-        classification = ensure_serializable(classification)
-        
-        # Fix for missing max_confidence field
-        if 'max_confidence' not in classification:
-            confidence_scores = classification.get('confidence_scores', {})
-            max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
-            classification['max_confidence'] = max_confidence
-        
-        # Generate reasoning
-        reasoning = classification.get('llm_explanation', '')
-        if not reasoning:
-            # Fallback reasoning based on confidence scores
-            scores = classification.get('confidence_scores', {})
-            if scores:
-                reasoning = f"Classification determined by confidence scores: "
-                for cls, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
-                    reasoning += f"{cls}: {score:.2f}, "
-            else:
-                reasoning = f"Classification method: {classification.get('detection_method', 'unknown')}"
-        
-        # Save to Snowflake
-        try:
-            save_to_snowflake(domain, url, content, classification)
-        except Exception as e:
-            logger.error(f"Background job {job_id}: Error saving to Snowflake: {e}")
-        
-        # Prepare result
-        result = {
-            "domain": domain,
-            "predicted_class": str(classification['predicted_class']),
-            "confidence_score": float(classification['max_confidence']),
-            "confidence_scores": classification.get('confidence_scores', {}),
-            "low_confidence": bool(classification.get('low_confidence', False)),
-            "detection_method": str(classification.get('detection_method', 'unknown')),
-            "reasoning": reasoning,
-            "source": "fresh"
-        }
-        
-        # Store result in memory
-        job_results[job_id] = result
-        job_status[job_id] = "completed"
-        logger.info(f"Background job {job_id}: Classification completed")
-        
-    except Exception as e:
-        logger.exception(f"Background job {job_id}: Error in background process: {str(e)}")
-        job_status[job_id] = "failed"
-        job_results[job_id] = {"error": str(e)}
-
-@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
-def classify_domain():
-    """Synchronous endpoint that processes the domain classification immediately"""
-    # Handle preflight requests
-    if request.method == 'OPTIONS':
-        return '', 204
-    
-    data = request.get_json()
-    url = data.get('url')
-    force_reclassify = data.get('force_reclassify', False)  # New parameter to force reclassification
-    
-    logger.info(f"Received request for {url}, force_reclassify={force_reclassify}")
-    
-    if not url:
-        return jsonify({"error": "URL is required"}), 400
-    
-    try:
-        # Parse domain from URL
-        parsed_url = urlparse(url)
-        if not parsed_url.scheme:
-            url = f"https://{url}"
-        domain = parsed_url.netloc or url
+        logger.info(f"Job {job_id}: Processing {domain}, force_reclassify={force_reclassify}")
         
         # Check for existing content in Snowflake first
         existing_content = None
@@ -328,14 +216,14 @@ def classify_domain():
                             'content': content_row[2],
                             'crawl_date': content_row[3]
                         }
-                        logger.info(f"Found existing content for {domain} from {existing_content['crawl_date']}")
+                        logger.info(f"Job {job_id}: Found existing content for {domain}")
                         
                     # Check if we have a previous classification
                     if not force_reclassify:
                         # Only check for existing classification if not forcing reclassification
                         existing_classification = snowflake_conn.check_existing_classification(domain)
                         if existing_classification:
-                            logger.info(f"Found existing classification for {domain}")
+                            logger.info(f"Job {job_id}: Found existing classification for {domain}")
                 except Exception as e:
                     logger.error(f"Error querying existing content: {e}")
                 finally:
@@ -344,6 +232,230 @@ def classify_domain():
         
         # If we have an existing classification and not forcing reclassify, return it
         if existing_classification and not force_reclassify:
+            # Try to parse all_scores if it exists
+            confidence_scores = {}
+            try:
+                if 'all_scores' in existing_classification:
+                    confidence_scores = json.loads(existing_classification.get('all_scores', '{}'))
+            except Exception as e:
+                logger.warning(f"Could not parse all_scores for {domain}: {e}")
+                
+            # Try to extract LLM explanation
+            llm_explanation = ""
+            try:
+                metadata = json.loads(existing_classification.get('model_metadata', '{}'))
+                llm_explanation = metadata.get('llm_explanation', '')
+            except Exception as e:
+                logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+            
+            # Generate a reasoning text based on available data
+            if llm_explanation:
+                reasoning = llm_explanation
+            else:
+                reasoning = f"Classification based on previously analyzed data. Detection method: {existing_classification.get('detection_method', 'unknown')}"
+            
+            result = {
+                "domain": domain,
+                "predicted_class": existing_classification.get('company_type', 'Unknown'),
+                "confidence_score": existing_classification.get('confidence_score', 0),
+                "confidence_scores": confidence_scores,
+                "low_confidence": existing_classification.get('low_confidence', True),
+                "detection_method": existing_classification.get('detection_method', 'unknown'),
+                "reasoning": reasoning,
+                "source": "cached" 
+            }
+            
+            save_job_status(job_id, "completed", result)
+            return
+        
+        # If we have existing content, use it for classification
+        content = None
+        if existing_content:
+            logger.info(f"Job {job_id}: Using existing content for {domain}")
+            content = existing_content['content']
+            save_job_status(job_id, "classifying")
+        else:
+            # Otherwise, crawl the site
+            logger.info(f"Job {job_id}: Starting crawl for {url}")
+            save_job_status(job_id, "crawling")
+            
+            try:
+                crawl_run_id = start_apify_crawl(url)
+                
+                # Wait for crawl to complete
+                crawl_results = None
+                for _ in range(30):  # try for up to 5 minutes (30 * 10 seconds)
+                    crawl_results = fetch_apify_results(crawl_run_id)
+                    
+                    if crawl_results.get('success'):
+                        break
+                        
+                    if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
+                        save_job_status(job_id, "failed", {"error": crawl_results.get('error', 'Unknown error')})
+                        return
+                        
+                    time.sleep(10)
+                
+                if not crawl_results or not crawl_results.get('success'):
+                    save_job_status(job_id, "failed", {"error": "Crawl timeout or no data returned"})
+                    return
+                
+                # Process the crawl results
+                content = crawl_results.get('content', '')
+                logger.info(f"Job {job_id}: Crawl completed for {domain}, got {len(content)} characters")
+                
+                # Save content to Snowflake
+                try:
+                    save_result, error = snowflake_conn.save_domain_content(domain=domain, url=url, content=content)
+                    if save_result:
+                        logger.info(f"Job {job_id}: Content saved to Snowflake for {domain}")
+                    else:
+                        logger.error(f"Job {job_id}: Failed to save content to Snowflake: {error}")
+                except Exception as e:
+                    logger.error(f"Job {job_id}: Error saving content to Snowflake: {e}")
+                
+                save_job_status(job_id, "classifying")
+            except Exception as e:
+                logger.error(f"Job {job_id}: Error during crawl: {e}")
+                save_job_status(job_id, "failed", {"error": str(e)})
+                return
+        
+        # Classify the domain
+        try:
+            logger.info(f"Job {job_id}: Classifying content for {domain}")
+            classification = classifier.classify_domain(content, domain=domain)
+            classification = ensure_serializable(classification)
+            
+            # Fix for missing max_confidence field
+            if 'max_confidence' not in classification:
+                confidence_scores = classification.get('confidence_scores', {})
+                max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
+                classification['max_confidence'] = max_confidence
+            
+            # Generate reasoning
+            reasoning = classification.get('llm_explanation', '')
+            if not reasoning:
+                # Fallback reasoning based on confidence scores
+                scores = classification.get('confidence_scores', {})
+                if scores:
+                    reasoning = f"Classification determined by confidence scores: "
+                    for cls, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                        reasoning += f"{cls}: {score:.2f}, "
+                else:
+                    reasoning = f"Classification method: {classification.get('detection_method', 'unknown')}"
+            
+            # Save to Snowflake
+            try:
+                logger.info(f"Job {job_id}: Saving classification to Snowflake for {domain}")
+                save_result = save_to_snowflake(domain, url, content, classification)
+                if save_result:
+                    logger.info(f"Job {job_id}: Classification saved to Snowflake for {domain}")
+                else:
+                    logger.error(f"Job {job_id}: Failed to save classification to Snowflake")
+            except Exception as e:
+                logger.error(f"Job {job_id}: Error saving to Snowflake: {e}")
+            
+            # Prepare result
+            result = {
+                "domain": domain,
+                "predicted_class": str(classification['predicted_class']),
+                "confidence_score": float(classification['max_confidence']),
+                "confidence_scores": classification.get('confidence_scores', {}),
+                "low_confidence": bool(classification.get('low_confidence', False)),
+                "detection_method": str(classification.get('detection_method', 'unknown')),
+                "reasoning": reasoning,
+                "source": "fresh" if not existing_content else "reclassified"
+            }
+            
+            save_job_status(job_id, "completed", result)
+            logger.info(f"Job {job_id}: Classification completed for {domain}")
+        except Exception as e:
+            logger.error(f"Job {job_id}: Error during classification: {e}")
+            save_job_status(job_id, "failed", {"error": str(e)})
+    except Exception as e:
+        logger.exception(f"Job {job_id}: Unexpected error: {e}")
+        save_job_status(job_id, "failed", {"error": str(e)})
+
+@app.route('/start-classification', methods=['POST', 'OPTIONS'])
+def start_classification():
+    """Start a domain classification job and return immediately with a job ID"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+        
+    data = request.get_json()
+    url = data.get('url')
+    force_reclassify = data.get('force_reclassify', False)
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    # Generate a job ID
+    job_id = str(uuid.uuid4())
+    
+    # Start a background thread to handle the classification
+    thread = threading.Thread(
+        target=process_domain_async, 
+        args=(job_id, url, force_reclassify)
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Classification started, check status with /check-classification/{job_id}"
+    }), 202
+
+@app.route('/check-classification/<job_id>', methods=['GET'])
+def check_classification(job_id):
+    """Check the status of a classification job"""
+    job_data = get_job_status(job_id)
+    
+    if not job_data:
+        return jsonify({"error": "Job not found"}), 404
+    
+    status = job_data.get('status')
+    
+    if status == "completed":
+        # Return the completed result
+        return jsonify(job_data.get('result')), 200
+    
+    if status == "failed":
+        # Return error information
+        return jsonify({"error": "Job failed", "details": job_data.get('result', {})}), 500
+    
+    # Job is still in progress
+    return jsonify({"status": status, "message": f"Job is {status}"}), 202
+
+@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
+def classify_domain():
+    """Legacy endpoint that now uses the async processing system but pretends to be synchronous"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.get_json()
+    url = data.get('url')
+    force_reclassify = data.get('force_reclassify', False)
+    
+    logger.info(f"Received request for {url}, force_reclassify={force_reclassify}")
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    # Parse domain from URL
+    parsed_url = urlparse(url)
+    if not parsed_url.scheme:
+        url = f"https://{url}"
+    domain = parsed_url.netloc or url
+    
+    # Check if we have an existing classification (quick response)
+    if not force_reclassify and hasattr(snowflake_conn, 'connected') and snowflake_conn.connected:
+        existing_classification = snowflake_conn.check_existing_classification(domain)
+        if existing_classification:
+            logger.info(f"Found existing classification for {domain}")
+            
             # Try to parse all_scores if it exists
             confidence_scores = {}
             try:
@@ -376,103 +488,54 @@ def classify_domain():
                 "reasoning": reasoning,
                 "source": "cached" 
             }), 200
-        
-        # If we have existing content, use it for classification (reclassify flow)
-        content = None
-        if existing_content:
-            logger.info(f"Using existing content for {domain}")
-            content = existing_content['content']
-            # This is where we're reclassifying using existing content
-        
-        # Otherwise, crawl the site
-        if not content:
-            logger.info(f"Starting crawl for {url}")
-            crawl_run_id = start_apify_crawl(url)
-            
-            # Wait for crawl to complete
-            while True:
-                crawl_results = fetch_apify_results(crawl_run_id)
-                
-                if crawl_results.get('success'):
-                    break
-                    
-                if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
-                    return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
-                    
-                time.sleep(5)
-            
-            # Process the crawl results
-            content = crawl_results.get('content', '')
-            logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
-            
-            # Save content to Snowflake if it's new
-            if not existing_content:
-                try:
-                    save_result, error = snowflake_conn.save_domain_content(domain=domain, url=url, content=content)
-                    if save_result:
-                        logger.info(f"Content saved to Snowflake for {domain}")
-                    else:
-                        logger.error(f"Failed to save content to Snowflake: {error}")
-                except Exception as e:
-                    logger.error(f"Error saving content to Snowflake: {e}")
-        
-        # Classify the domain
-        logger.info(f"Classifying content for {domain}, content length: {len(content)}")
-        classification = classifier.classify_domain(content, domain=domain)
-        classification = ensure_serializable(classification)
-        
-        # Print classification details for debugging
-        logger.info(f"Raw classification result: {json.dumps(classification)}")
-        
-        # Fix for missing max_confidence field
-        if 'max_confidence' not in classification:
-            confidence_scores = classification.get('confidence_scores', {})
-            max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
-            classification['max_confidence'] = max_confidence
-        
-        # Generate reasoning
-        reasoning = classification.get('llm_explanation', '')
-        if not reasoning:
-            # Fallback reasoning based on confidence scores
-            scores = classification.get('confidence_scores', {})
-            if scores:
-                reasoning = f"Classification determined by confidence scores: "
-                for cls, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
-                    reasoning += f"{cls}: {score:.2f}, "
-            else:
-                reasoning = f"Classification method: {classification.get('detection_method', 'unknown')}"
-        
-        # Save to Snowflake
-        try:
-            logger.info(f"Saving classification to Snowflake for {domain}: {classification['predicted_class']}")
-            save_result = save_to_snowflake(domain, url, content, classification)
-            if save_result:
-                logger.info(f"Classification saved to Snowflake for {domain}")
-            else:
-                logger.error(f"Failed to save classification to Snowflake for {domain}")
-        except Exception as e:
-            logger.error(f"Error saving to Snowflake: {e}")
-        
-        # Verify predicted_class matches confidence scores
-        confidence_scores = classification.get('confidence_scores', {})
-        if confidence_scores and classification['predicted_class'] != max(confidence_scores.items(), key=lambda x: x[1])[0]:
-            logger.warning(f"Predicted class doesn't match highest confidence score! predicted={classification['predicted_class']}, highest={max(confidence_scores.items(), key=lambda x: x[1])}")
-        
-        # Return the result
-        return jsonify({
-            "domain": domain,
-            "predicted_class": str(classification['predicted_class']),
-            "confidence_score": float(classification['max_confidence']),
-            "confidence_scores": classification.get('confidence_scores', {}),
-            "low_confidence": bool(classification.get('low_confidence', False)),
-            "detection_method": str(classification.get('detection_method', 'unknown')),
-            "reasoning": reasoning,
-            "source": "fresh" if not existing_content else "reclassified"
-        }), 200
-        
-    except Exception as e:
-        logger.exception(f"Error in classify-domain: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    
+    # Otherwise, start async processing and return a job ID
+    # Generate a job ID
+    job_id = str(uuid.uuid4())
+    
+    # Start a background thread to handle the classification
+    thread = threading.Thread(
+        target=process_domain_async, 
+        args=(job_id, url, force_reclassify)
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Classification started, check status with /check-classification/{job_id}"
+    }), 202
+
+@app.route('/force-reclassify', methods=['POST', 'OPTIONS'])
+def force_reclassify():
+    """Endpoint to force reclassification of a domain"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.get_json()
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    # Start async processing with force_reclassify=True
+    job_id = str(uuid.uuid4())
+    
+    # Start a background thread to handle the classification
+    thread = threading.Thread(
+        target=process_domain_async, 
+        args=(job_id, url, True)  # force_reclassify=True
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Reclassification started, check status with /check-classification/{job_id}"
+    }), 202
 
 def save_to_snowflake(domain, url, content, classification):
     """Helper function to save classification data to Snowflake"""
@@ -528,25 +591,9 @@ def health_check():
         "model_fallback": getattr(classifier, '_using_fallback', True),
         "llm_available": hasattr(classifier, 'llm_classifier') and classifier.llm_classifier is not None,
         "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None,
-        "snowflake_connected": getattr(snowflake_conn, 'connected', False)
+        "snowflake_connected": getattr(snowflake_conn, 'connected', False),
+        "job_dir_exists": os.path.exists(JOB_DIR)
     }), 200
-
-@app.route('/force-reclassify', methods=['POST', 'OPTIONS'])
-def force_reclassify():
-    """Endpoint to force reclassification of a domain using existing content"""
-    # Handle preflight requests
-    if request.method == 'OPTIONS':
-        return '', 204
-    
-    data = request.get_json()
-    url = data.get('url')
-    
-    if not url:
-        return jsonify({"error": "URL is required"}), 400
-    
-    # Call the classify_domain function with force_reclassify=True
-    data['force_reclassify'] = True
-    return classify_domain()
     
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5005)), debug=False, use_reloader=False)
