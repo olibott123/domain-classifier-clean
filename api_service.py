@@ -11,7 +11,7 @@ import numpy as np
 import logging
 import threading
 import uuid
-from collections import defaultdict
+import os.path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +78,34 @@ except Exception as e:
     
     snowflake_conn = FallbackSnowflakeConnector()
 
+# Create a directory for job results
+JOB_DIR = '/workspace/job_results'
+os.makedirs(JOB_DIR, exist_ok=True)
+
+def save_job_result(job_id, result):
+    """Save job result to a file"""
+    try:
+        filepath = os.path.join(JOB_DIR, f"{job_id}.json")
+        with open(filepath, "w") as f:
+            json.dump(result, f)
+        logger.info(f"Saved job result to {filepath}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving job result: {e}")
+        return False
+
+def load_job_result(job_id):
+    """Load job result from a file"""
+    try:
+        filepath = os.path.join(JOB_DIR, f"{job_id}.json")
+        if not os.path.exists(filepath):
+            return None
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading job result: {e}")
+        return None
+
 def start_apify_crawl(url):
     """Start a crawl of the specified URL using Apify."""
     try:
@@ -140,27 +168,9 @@ def ensure_serializable(obj):
     else:
         return obj
 
-@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
-def classify_domain():
-    """Synchronous endpoint that processes the domain classification immediately"""
-    # Handle preflight requests
-    if request.method == 'OPTIONS':
-        return '', 204
-    
-    data = request.get_json()
-    url = data.get('url')
-    force_reclassify = data.get('force_reclassify', False)  # Add this parameter
-    
-    if not url:
-        return jsonify({"error": "URL is required"}), 400
-    
+def process_domain(domain, url, force_reclassify=False):
+    """Process a domain classification (can be run in background)"""
     try:
-        # Parse domain from URL
-        parsed_url = urlparse(url)
-        if not parsed_url.scheme:
-            url = f"https://{url}"
-        domain = parsed_url.netloc or url
-        
         # Check existing records in Snowflake (only if not forcing reclassification)
         existing_record = None
         if not force_reclassify:
@@ -191,7 +201,8 @@ def classify_domain():
             else:
                 reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
             
-            return jsonify({
+            # Return cached result
+            return {
                 "domain": domain,
                 "predicted_class": existing_record.get('company_type', 'Unknown'),
                 "confidence_score": existing_record.get('confidence_score', 0),
@@ -199,8 +210,9 @@ def classify_domain():
                 "low_confidence": existing_record.get('low_confidence', True),
                 "detection_method": existing_record.get('detection_method', 'unknown'),
                 "reasoning": reasoning,
-                "source": "cached" 
-            }), 200
+                "source": "cached",
+                "status": "completed"
+            }
         
         # Now we need to get the content - either from existing records or by crawling
         content = None
@@ -237,16 +249,26 @@ def classify_domain():
             crawl_run_id = start_apify_crawl(url)
             
             # Wait for crawl to complete
-            while True:
+            crawl_results = None
+            for _ in range(30):  # try for up to 5 minutes (30 * 10 seconds)
                 crawl_results = fetch_apify_results(crawl_run_id)
                 
                 if crawl_results.get('success'):
                     break
                     
                 if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
-                    return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+                    return {
+                        "status": "failed", 
+                        "error": crawl_results.get('error', 'Unknown error')
+                    }
                     
-                time.sleep(5)
+                time.sleep(10)
+            
+            if not crawl_results or not crawl_results.get('success'):
+                return {
+                    "status": "failed", 
+                    "error": "Crawl timeout or no data returned"
+                }
             
             # Process the crawl results
             content = crawl_results.get('content', '')
@@ -290,7 +312,7 @@ def classify_domain():
             logger.error(f"Error saving to Snowflake: {e}")
         
         # Return the result
-        return jsonify({
+        return {
             "domain": domain,
             "predicted_class": str(classification['predicted_class']),
             "confidence_score": float(classification['max_confidence']),
@@ -298,12 +320,144 @@ def classify_domain():
             "low_confidence": bool(classification.get('low_confidence', False)),
             "detection_method": str(classification.get('detection_method', 'unknown')),
             "reasoning": reasoning,
-            "source": "reclassified" if force_reclassify else "fresh"
-        }), 200
+            "source": "reclassified" if force_reclassify else "fresh",
+            "status": "completed"
+        }
         
     except Exception as e:
-        logger.exception(f"Error in classify-domain: {str(e)}")
+        logger.exception(f"Error processing domain {domain}: {str(e)}")
+        return {
+            "status": "failed",
+            "error": str(e)
+        }
+
+def process_domain_async(job_id, url, force_reclassify=False):
+    """Process domain in a background thread and save the result"""
+    try:
+        # Parse domain from URL
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme:
+            url = f"https://{url}"
+        domain = parsed_url.netloc or url
+        
+        # Process the domain
+        result = process_domain(domain, url, force_reclassify)
+        
+        # Save the result
+        save_job_result(job_id, result)
+        
+        logger.info(f"Completed job {job_id} for {domain}")
+        
+    except Exception as e:
+        logger.exception(f"Error in background process for job {job_id}: {str(e)}")
+        save_job_result(job_id, {
+            "status": "failed",
+            "error": str(e)
+        })
+
+@app.route('/start-classification', methods=['POST', 'OPTIONS'])
+def start_classification():
+    """Start a domain classification job and return a job ID immediately"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.get_json()
+    url = data.get('url')
+    force_reclassify = data.get('force_reclassify', False)
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    try:
+        # Parse domain from URL
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme:
+            url = f"https://{url}"
+        domain = parsed_url.netloc or url
+        
+        # Check for existing cached classification
+        if not force_reclassify:
+            existing_record = snowflake_conn.check_existing_classification(domain)
+            if existing_record:
+                # For cached results, process immediately and return
+                result = process_domain(domain, url, force_reclassify=False)
+                return jsonify(result), 200
+        
+        # For new or force-reclassify requests, start a background job
+        job_id = str(uuid.uuid4())
+        
+        # Save initial job status
+        save_job_result(job_id, {
+            "status": "processing",
+            "domain": domain
+        })
+        
+        # Start the background process
+        thread = threading.Thread(
+            target=process_domain_async, 
+            args=(job_id, url, force_reclassify)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "job_id": job_id,
+            "status": "processing",
+            "message": "Classification started, check status with /check-status/" + job_id
+        }), 202
+        
+    except Exception as e:
+        logger.exception(f"Error starting classification: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/check-status/<job_id>', methods=['GET'])
+def check_status(job_id):
+    """Check the status of a classification job"""
+    # Load the job result
+    result = load_job_result(job_id)
+    
+    if result is None:
+        return jsonify({"error": "Job not found"}), 404
+    
+    if result.get('status') == 'completed':
+        return jsonify(result), 200
+    
+    if result.get('status') == 'failed':
+        return jsonify({"error": result.get('error', 'Unknown error')}), 500
+    
+    # Still processing
+    return jsonify({
+        "status": result.get('status', 'processing'),
+        "message": "Job is still processing"
+    }), 202
+
+@app.route('/classify-domain', methods=['POST', 'OPTIONS'])
+def classify_domain():
+    """Main endpoint that now uses the two-step process but maintains the original API interface"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.get_json()
+    
+    # Start the classification
+    response = start_classification()
+    
+    # If it's a cached result (status 200), return it directly
+    if response[1] == 200:
+        return response
+    
+    # Otherwise, it's a job that needs to be polled
+    response_data = response[0].json
+    job_id = response_data.get('job_id')
+    
+    # Return the job information for polling
+    return jsonify({
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Classification started, check status with /check-status/" + job_id
+    }), 202
 
 @app.route('/force-reclassify', methods=['POST', 'OPTIONS'])
 def force_reclassify():
@@ -321,8 +475,8 @@ def force_reclassify():
     # Add force_reclassify=True to the request
     data['force_reclassify'] = True
     
-    # Call the classify_domain function
-    return classify_domain()
+    # Call the start_classification function
+    return start_classification()
 
 def save_to_snowflake(domain, url, content, classification):
     """Helper function to save classification data to Snowflake"""
@@ -358,30 +512,6 @@ def save_to_snowflake(domain, url, content, classification):
         logger.error(f"Error saving to Snowflake: {e}")
         return False
 
-@app.route('/test-llm-classification', methods=['POST'])
-def test_llm_classification():
-    data = request.get_json()
-    domain = data.get('domain')
-    content = data.get('content')
-    
-    if not content:
-        return jsonify({"error": "Content required for classification test"}), 400
-    
-    try:
-        # Directly use the LLM classifier part
-        llm_result = classifier.llm_classifier.classify(content, domain)
-        # Ensure all values are JSON serializable
-        llm_result = ensure_serializable(llm_result)
-        
-        return jsonify({
-            "domain": domain,
-            "llm_classification": llm_result
-        }), 200
-    
-    except Exception as e:
-        logger.exception(f"Error in test-llm-classification: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Simple health check endpoint to verify the API is running"""
@@ -391,7 +521,8 @@ def health_check():
         "model_fallback": getattr(classifier, '_using_fallback', True),
         "llm_available": hasattr(classifier, 'llm_classifier') and classifier.llm_classifier is not None,
         "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None,
-        "snowflake_connected": getattr(snowflake_conn, 'connected', False)
+        "snowflake_connected": getattr(snowflake_conn, 'connected', False),
+        "job_dir_writable": os.access(JOB_DIR, os.W_OK)
     }), 200
     
 if __name__ == '__main__':
