@@ -90,7 +90,8 @@ def start_apify_crawl(url):
         payload = {
             "startUrls": [{"url": url}],
             "maxCrawlingDepth": 1,  # Limit depth for faster crawls
-            "maxCrawlPages": 10     # Limit pages for faster crawls
+            "maxCrawlPages": 10,    # Limit pages for faster crawls
+            "timeout": 300          # 5 minute timeout
         }
         headers = {"Content-Type": "application/json"}
         
@@ -290,6 +291,8 @@ def classify_domain():
     url = data.get('url')
     force_reclassify = data.get('force_reclassify', False)  # New parameter to force reclassification
     
+    logger.info(f"Received request for {url}, force_reclassify={force_reclassify}")
+    
     if not url:
         return jsonify({"error": "URL is required"}), 400
     
@@ -374,7 +377,7 @@ def classify_domain():
                 "source": "cached" 
             }), 200
         
-        # If we have existing content, use it for classification
+        # If we have existing content, use it for classification (reclassify flow)
         content = None
         if existing_content:
             logger.info(f"Using existing content for {domain}")
@@ -405,15 +408,21 @@ def classify_domain():
             # Save content to Snowflake if it's new
             if not existing_content:
                 try:
-                    save_result, _ = snowflake_conn.save_domain_content(domain=domain, url=url, content=content)
+                    save_result, error = snowflake_conn.save_domain_content(domain=domain, url=url, content=content)
                     if save_result:
                         logger.info(f"Content saved to Snowflake for {domain}")
+                    else:
+                        logger.error(f"Failed to save content to Snowflake: {error}")
                 except Exception as e:
                     logger.error(f"Error saving content to Snowflake: {e}")
         
         # Classify the domain
+        logger.info(f"Classifying content for {domain}, content length: {len(content)}")
         classification = classifier.classify_domain(content, domain=domain)
         classification = ensure_serializable(classification)
+        
+        # Print classification details for debugging
+        logger.info(f"Raw classification result: {json.dumps(classification)}")
         
         # Fix for missing max_confidence field
         if 'max_confidence' not in classification:
@@ -435,9 +444,19 @@ def classify_domain():
         
         # Save to Snowflake
         try:
-            save_to_snowflake(domain, url, content, classification)
+            logger.info(f"Saving classification to Snowflake for {domain}: {classification['predicted_class']}")
+            save_result = save_to_snowflake(domain, url, content, classification)
+            if save_result:
+                logger.info(f"Classification saved to Snowflake for {domain}")
+            else:
+                logger.error(f"Failed to save classification to Snowflake for {domain}")
         except Exception as e:
             logger.error(f"Error saving to Snowflake: {e}")
+        
+        # Verify predicted_class matches confidence scores
+        confidence_scores = classification.get('confidence_scores', {})
+        if confidence_scores and classification['predicted_class'] != max(confidence_scores.items(), key=lambda x: x[1])[0]:
+            logger.warning(f"Predicted class doesn't match highest confidence score! predicted={classification['predicted_class']}, highest={max(confidence_scores.items(), key=lambda x: x[1])}")
         
         # Return the result
         return jsonify({
@@ -458,9 +477,13 @@ def classify_domain():
 def save_to_snowflake(domain, url, content, classification):
     """Helper function to save classification data to Snowflake"""
     try:
-        success_content, _ = snowflake_conn.save_domain_content(
+        # Ensure domain content is saved
+        success_content, error = snowflake_conn.save_domain_content(
             domain=domain, url=url, content=content
         )
+        
+        if not success_content:
+            logger.error(f"Failed to save domain content: {error}")
 
         # Ensure max_confidence exists
         if 'max_confidence' not in classification:
@@ -474,8 +497,10 @@ def save_to_snowflake(domain, url, content, classification):
             'llm_model': 'claude-3-haiku-20240307',
             'llm_explanation': llm_explanation[:1000] if llm_explanation else ''
         }
+        
+        logger.info(f"Saving classification to Snowflake: {domain}, {classification['predicted_class']}, {classification['max_confidence']}")
 
-        snowflake_conn.save_classification(
+        success_class, error_class = snowflake_conn.save_classification(
             domain=domain,
             company_type=str(classification['predicted_class']),
             confidence_score=float(classification['max_confidence']),
@@ -484,6 +509,11 @@ def save_to_snowflake(domain, url, content, classification):
             low_confidence=bool(classification.get('low_confidence', False)),
             detection_method=str(classification.get('detection_method', 'unknown'))
         )
+        
+        if not success_class:
+            logger.error(f"Failed to save classification: {error_class}")
+            return False
+            
         return True
     except Exception as e:
         logger.error(f"Error saving to Snowflake: {e}")
