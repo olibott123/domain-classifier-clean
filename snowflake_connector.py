@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 import snowflake.connector
 from snowflake.connector.errors import ProgrammingError, DatabaseError
+from datetime import datetime, timedelta
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -130,6 +131,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
+            # Look for classifications not older than 30 days
             query = """
                 SELECT
                     DOMAIN,
@@ -142,6 +144,7 @@ class SnowflakeConnector:
                     CLASSIFICATION_DATE
                 FROM DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
+                AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
                 ORDER BY CLASSIFICATION_DATE DESC
                 LIMIT 1
             """
@@ -165,6 +168,42 @@ class SnowflakeConnector:
             if conn:
                 conn.close()
     
+    def get_domain_content(self, domain):
+        """Get the most recent content for a domain from Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: No content for {domain}")
+            return None
+            
+        conn = self.get_connection()
+        if not conn:
+            return None
+            
+        try:
+            cursor = conn.cursor()
+            query = """
+                SELECT text_content
+                FROM DOMAIN_CONTENT
+                WHERE domain = %s
+                ORDER BY crawl_date DESC
+                LIMIT 1
+            """
+            cursor.execute(query, (domain,))
+            
+            result = cursor.fetchone()
+            if result and result[0]:
+                logger.info(f"Found existing content for {domain}")
+                return result[0]
+            
+            logger.info(f"No existing content found for {domain}")
+            return None
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            logger.error(f"Error retrieving domain content: {error_msg}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
     def save_domain_content(self, domain, url, content):
         """Save domain content to Snowflake."""
         if not self.connected:
@@ -178,7 +217,12 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Insert new record - using the table structure with ID autoincrement
+            # Check if content exists and is not empty
+            if not content or len(content.strip()) < 100:
+                logger.warning(f"Content for {domain} is too short or empty, not saving")
+                return False, "Content too short or empty"
+            
+            # Insert new record
             cursor.execute("""
                 INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
                 VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
