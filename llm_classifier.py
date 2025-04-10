@@ -2,7 +2,7 @@ import requests
 import logging
 import json
 import time
-import re  # Add this import for regex functionality
+import re
 from typing import Dict, Any, List, Optional
 import os
 
@@ -147,6 +147,15 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                                     # Try to parse free-form text
                                     parsed_result = self._parse_free_text(text_content)
                                     logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
+                                    
+                                    # Fix discrepancy between predicted_class and confidence scores
+                                    if "confidence_scores" in parsed_result:
+                                        confidence_scores = parsed_result["confidence_scores"]
+                                        if confidence_scores:
+                                            max_class = max(confidence_scores.items(), key=lambda x: x[1])
+                                            parsed_result["predicted_class"] = max_class[0]
+                                            parsed_result["max_confidence"] = max_class[1]
+                                    
                                     return parsed_result
                                 
                                 parsed_json = json.loads(json_str.group(1))
@@ -164,18 +173,33 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                                     # Extract reasoning from the full text
                                     parsed_json["llm_explanation"] = self._extract_explanation(text_content)
                                 
-                                # Calculate max confidence
+                                # Ensure predicted_class matches highest confidence score
                                 confidence_scores = parsed_json.get("confidence_scores", {})
                                 if confidence_scores:
-                                    parsed_json["max_confidence"] = max(confidence_scores.values())
+                                    max_class = max(confidence_scores.items(), key=lambda x: x[1])
+                                    parsed_json["predicted_class"] = max_class[0]
+                                    parsed_json["max_confidence"] = max_class[1]
                                 else:
                                     parsed_json["max_confidence"] = 0.7  # Default confidence
+                                
+                                # Set detection method
+                                parsed_json["detection_method"] = "llm_classification"
                                 
                                 return parsed_json
                             except Exception as e:
                                 logger.error(f"Error parsing LLM response: {e}")
                                 # Fall back to manual parsing
-                                return self._parse_free_text(text_content)
+                                result = self._parse_free_text(text_content)
+                                
+                                # Fix discrepancy between predicted_class and confidence scores
+                                if "confidence_scores" in result:
+                                    confidence_scores = result["confidence_scores"]
+                                    if confidence_scores:
+                                        max_class = max(confidence_scores.items(), key=lambda x: x[1])
+                                        result["predicted_class"] = max_class[0]
+                                        result["max_confidence"] = max_class[1]
+                                
+                                return result
                         else:
                             raise ValueError("Empty response from Claude API")
                     elif response.status_code == 429:  # Rate limited
@@ -241,9 +265,11 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         # Extract explanation
         result["llm_explanation"] = self._extract_explanation(text)
         
-        # Calculate max confidence
+        # Calculate max confidence and ensure predicted_class matches highest confidence
         if result["confidence_scores"]:
-            result["max_confidence"] = max(result["confidence_scores"].values())
+            max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
+            result["max_confidence"] = max_class[1]
+            result["predicted_class"] = max_class[0]  # Ensure predicted_class matches highest score
         else:
             result["max_confidence"] = 0.7  # Default confidence
         
