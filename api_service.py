@@ -288,6 +288,7 @@ def classify_domain():
     
     data = request.get_json()
     url = data.get('url')
+    force_reclassify = data.get('force_reclassify', False)  # New parameter to force reclassification
     
     if not url:
         return jsonify({"error": "URL is required"}), 400
@@ -299,23 +300,59 @@ def classify_domain():
             url = f"https://{url}"
         domain = parsed_url.netloc or url
         
-        # Check existing records in Snowflake
-        existing_record = snowflake_conn.check_existing_classification(domain)
-        if existing_record:
-            logger.info(f"Found existing record for {domain}")
-            
+        # Check for existing content in Snowflake first
+        existing_content = None
+        existing_classification = None
+        
+        if hasattr(snowflake_conn, 'connected') and snowflake_conn.connected:
+            # Try to get existing content
+            conn = snowflake_conn.get_connection()
+            if conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        SELECT domain, url, text_content, crawl_date 
+                        FROM DOMAIN_CONTENT 
+                        WHERE domain = %s 
+                        ORDER BY crawl_date DESC LIMIT 1
+                    """, (domain,))
+                    content_row = cursor.fetchone()
+                    
+                    if content_row:
+                        existing_content = {
+                            'domain': content_row[0],
+                            'url': content_row[1],
+                            'content': content_row[2],
+                            'crawl_date': content_row[3]
+                        }
+                        logger.info(f"Found existing content for {domain} from {existing_content['crawl_date']}")
+                        
+                    # Check if we have a previous classification
+                    if not force_reclassify:
+                        # Only check for existing classification if not forcing reclassification
+                        existing_classification = snowflake_conn.check_existing_classification(domain)
+                        if existing_classification:
+                            logger.info(f"Found existing classification for {domain}")
+                except Exception as e:
+                    logger.error(f"Error querying existing content: {e}")
+                finally:
+                    cursor.close()
+                    conn.close()
+        
+        # If we have an existing classification and not forcing reclassify, return it
+        if existing_classification and not force_reclassify:
             # Try to parse all_scores if it exists
             confidence_scores = {}
             try:
-                if 'all_scores' in existing_record:
-                    confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+                if 'all_scores' in existing_classification:
+                    confidence_scores = json.loads(existing_classification.get('all_scores', '{}'))
             except Exception as e:
                 logger.warning(f"Could not parse all_scores for {domain}: {e}")
                 
             # Try to extract LLM explanation
             llm_explanation = ""
             try:
-                metadata = json.loads(existing_record.get('model_metadata', '{}'))
+                metadata = json.loads(existing_classification.get('model_metadata', '{}'))
                 llm_explanation = metadata.get('llm_explanation', '')
             except Exception as e:
                 logger.warning(f"Could not parse model_metadata for {domain}: {e}")
@@ -324,38 +361,55 @@ def classify_domain():
             if llm_explanation:
                 reasoning = llm_explanation
             else:
-                reasoning = f"Classification based on previously analyzed data. Detection method: {existing_record.get('detection_method', 'unknown')}"
+                reasoning = f"Classification based on previously analyzed data. Detection method: {existing_classification.get('detection_method', 'unknown')}"
             
             return jsonify({
                 "domain": domain,
-                "predicted_class": existing_record.get('company_type', 'Unknown'),
-                "confidence_score": existing_record.get('confidence_score', 0),
+                "predicted_class": existing_classification.get('company_type', 'Unknown'),
+                "confidence_score": existing_classification.get('confidence_score', 0),
                 "confidence_scores": confidence_scores,
-                "low_confidence": existing_record.get('low_confidence', True),
-                "detection_method": existing_record.get('detection_method', 'unknown'),
+                "low_confidence": existing_classification.get('low_confidence', True),
+                "detection_method": existing_classification.get('detection_method', 'unknown'),
                 "reasoning": reasoning,
                 "source": "cached" 
             }), 200
         
-        # Start the crawl
-        logger.info(f"Starting crawl for {url}")
-        crawl_run_id = start_apify_crawl(url)
+        # If we have existing content, use it for classification
+        content = None
+        if existing_content:
+            logger.info(f"Using existing content for {domain}")
+            content = existing_content['content']
+            # This is where we're reclassifying using existing content
         
-        # Wait for crawl to complete
-        while True:
-            crawl_results = fetch_apify_results(crawl_run_id)
+        # Otherwise, crawl the site
+        if not content:
+            logger.info(f"Starting crawl for {url}")
+            crawl_run_id = start_apify_crawl(url)
             
-            if crawl_results.get('success'):
-                break
+            # Wait for crawl to complete
+            while True:
+                crawl_results = fetch_apify_results(crawl_run_id)
                 
-            if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
-                return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
-                
-            time.sleep(5)
-        
-        # Process the crawl results
-        content = crawl_results.get('content', '')
-        logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
+                if crawl_results.get('success'):
+                    break
+                    
+                if crawl_results.get('error') and "Timeout" not in crawl_results.get('error'):
+                    return jsonify({"error": crawl_results.get('error', 'Unknown error')}), 500
+                    
+                time.sleep(5)
+            
+            # Process the crawl results
+            content = crawl_results.get('content', '')
+            logger.info(f"Crawl completed for {domain}, got {len(content)} characters of content")
+            
+            # Save content to Snowflake if it's new
+            if not existing_content:
+                try:
+                    save_result, _ = snowflake_conn.save_domain_content(domain=domain, url=url, content=content)
+                    if save_result:
+                        logger.info(f"Content saved to Snowflake for {domain}")
+                except Exception as e:
+                    logger.error(f"Error saving content to Snowflake: {e}")
         
         # Classify the domain
         classification = classifier.classify_domain(content, domain=domain)
@@ -394,7 +448,7 @@ def classify_domain():
             "low_confidence": bool(classification.get('low_confidence', False)),
             "detection_method": str(classification.get('detection_method', 'unknown')),
             "reasoning": reasoning,
-            "source": "fresh"
+            "source": "fresh" if not existing_content else "reclassified"
         }), 200
         
     except Exception as e:
@@ -446,6 +500,23 @@ def health_check():
         "pinecone_available": hasattr(classifier, 'pinecone_index') and classifier.pinecone_index is not None,
         "snowflake_connected": getattr(snowflake_conn, 'connected', False)
     }), 200
+
+@app.route('/force-reclassify', methods=['POST', 'OPTIONS'])
+def force_reclassify():
+    """Endpoint to force reclassification of a domain using existing content"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.get_json()
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({"error": "URL is required"}), 400
+    
+    # Call the classify_domain function with force_reclassify=True
+    data['force_reclassify'] = True
+    return classify_domain()
     
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5005)), debug=False, use_reloader=False)
