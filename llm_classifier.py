@@ -147,15 +147,6 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                                     # Try to parse free-form text
                                     parsed_result = self._parse_free_text(text_content)
                                     logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
-                                    
-                                    # Fix discrepancy between predicted_class and confidence scores
-                                    if "confidence_scores" in parsed_result:
-                                        confidence_scores = parsed_result["confidence_scores"]
-                                        if confidence_scores:
-                                            max_class = max(confidence_scores.items(), key=lambda x: x[1])
-                                            parsed_result["predicted_class"] = max_class[0]
-                                            parsed_result["max_confidence"] = max_class[1]
-                                    
                                     return parsed_result
                                 
                                 parsed_json = json.loads(json_str.group(1))
@@ -181,7 +172,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                                     parsed_json["max_confidence"] = max_class[1]
                                 else:
                                     parsed_json["max_confidence"] = 0.7  # Default confidence
-                                
+                                    
                                 # Set detection method
                                 parsed_json["detection_method"] = "llm_classification"
                                 
@@ -189,17 +180,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                             except Exception as e:
                                 logger.error(f"Error parsing LLM response: {e}")
                                 # Fall back to manual parsing
-                                result = self._parse_free_text(text_content)
-                                
-                                # Fix discrepancy between predicted_class and confidence scores
-                                if "confidence_scores" in result:
-                                    confidence_scores = result["confidence_scores"]
-                                    if confidence_scores:
-                                        max_class = max(confidence_scores.items(), key=lambda x: x[1])
-                                        result["predicted_class"] = max_class[0]
-                                        result["max_confidence"] = max_class[1]
-                                
-                                return result
+                                return self._parse_free_text(text_content)
                         else:
                             raise ValueError("Empty response from Claude API")
                     elif response.status_code == 429:  # Rate limited
@@ -232,14 +213,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             }
     
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
-        """Parse classification from free-form text response.
-        
-        Args:
-            text: The text response from the LLM
-            
-        Returns:
-            Dict containing parsed classification results
-        """
+        """Parse classification from free-form text response."""
         result = {
             "confidence_scores": {
                 "Integrator - Commercial A/V": 0.0,
@@ -249,41 +223,84 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             "llm_explanation": ""
         }
         
-        # Try to identify the predicted class
-        if "commercial a/v" in text.lower() or "commercial av" in text.lower():
-            result["predicted_class"] = "Integrator - Commercial A/V"
-        elif "residential a/v" in text.lower() or "residential av" in text.lower() or "home theater" in text.lower():
-            result["predicted_class"] = "Integrator - Residential A/V"
-        elif "managed service" in text.lower() or "it service" in text.lower() or "msp" in text.lower():
-            result["predicted_class"] = "Managed Service Provider"
-        else:
-            result["predicted_class"] = "Unknown"
+        # First, examine the explanation to identify the main classification
+        lower_text = text.lower()
         
-        # Extract confidence scores
-        result["confidence_scores"] = self._extract_confidence_scores(text)
+        # Look for clear statements about the classification
+        msp_indicators = ["managed service provider", "msp", "it service", "it support", 
+                         "classify as a managed service", "classify it as a managed service",
+                         "classify as an msp", "classify it as an msp", "would classify it as a managed service",
+                         "would classify it as an msp", "is a managed service provider", "is an msp",
+                         "appears to be a managed service provider", "appears to be an msp"]
+                         
+        commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator",
+                               "classify as a commercial", "classify it as a commercial",
+                               "is a commercial a/v integrator", "is a commercial av integrator",
+                               "appears to be a commercial a/v", "appears to be a commercial av"]
+                               
+        residential_indicators = ["residential a/v", "residential av", "home theater", 
+                                "classify as a residential", "classify it as a residential",
+                                "is a residential a/v integrator", "is a residential av integrator",
+                                "appears to be a residential a/v", "appears to be a residential av"]
+        
+        # Check for definitive classification statements
+        msp_score = sum(1 for indicator in msp_indicators if indicator in lower_text)
+        commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
+        residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
+        
+        # Assign predicted class based on which has the most matching indicators
+        if msp_score > commercial_score and msp_score > residential_score:
+            result["predicted_class"] = "Managed Service Provider"
+            result["confidence_scores"]["Managed Service Provider"] = 0.8
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
+        elif commercial_score > msp_score and commercial_score > residential_score:
+            result["predicted_class"] = "Integrator - Commercial A/V"
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.8
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
+            result["confidence_scores"]["Managed Service Provider"] = 0.1
+        elif residential_score > msp_score and residential_score > commercial_score:
+            result["predicted_class"] = "Integrator - Residential A/V"
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.8
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
+            result["confidence_scores"]["Managed Service Provider"] = 0.1
+        else:
+            # If no clear winner from indicators, fall back to simple text presence
+            if "managed service provider" in lower_text or "msp" in lower_text:
+                result["predicted_class"] = "Managed Service Provider"
+                result["confidence_scores"]["Managed Service Provider"] = 0.8
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
+            elif "commercial a/v" in lower_text or "commercial av" in lower_text:
+                result["predicted_class"] = "Integrator - Commercial A/V"
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.8
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
+                result["confidence_scores"]["Managed Service Provider"] = 0.1
+            elif "residential a/v" in lower_text or "residential av" in lower_text or "home theater" in lower_text:
+                result["predicted_class"] = "Integrator - Residential A/V"
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.8
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
+                result["confidence_scores"]["Managed Service Provider"] = 0.1
+            else:
+                result["predicted_class"] = "Unknown"
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.33
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.33
+                result["confidence_scores"]["Managed Service Provider"] = 0.34
         
         # Extract explanation
         result["llm_explanation"] = self._extract_explanation(text)
         
-        # Calculate max confidence and ensure predicted_class matches highest confidence
+        # Calculate max confidence
         if result["confidence_scores"]:
             max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
             result["max_confidence"] = max_class[1]
-            result["predicted_class"] = max_class[0]  # Ensure predicted_class matches highest score
         else:
             result["max_confidence"] = 0.7  # Default confidence
         
         return result
     
     def _extract_confidence_scores(self, text: str) -> Dict[str, float]:
-        """Extract confidence scores from text response.
-        
-        Args:
-            text: The text response from the LLM
-            
-        Returns:
-            Dict containing confidence scores for each category
-        """
+        """Extract confidence scores from text response."""
         scores = {
             "Integrator - Commercial A/V": 0.0,
             "Integrator - Residential A/V": 0.0,
@@ -321,20 +338,25 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             except:
                 pass
         
-        # If no scores were extracted, assign based on predicted class
+        # If no scores were extracted, determine scores from the text content
         if all(score == 0.0 for score in scores.values()):
-            if "commercial a/v" in text.lower() or "commercial av" in text.lower():
-                scores["Integrator - Commercial A/V"] = 0.8
-                scores["Integrator - Residential A/V"] = 0.1
-                scores["Managed Service Provider"] = 0.1
-            elif "residential a/v" in text.lower() or "residential av" in text.lower():
-                scores["Integrator - Commercial A/V"] = 0.1
-                scores["Integrator - Residential A/V"] = 0.8
-                scores["Managed Service Provider"] = 0.1
-            elif "managed service" in text.lower() or "msp" in text.lower():
-                scores["Integrator - Commercial A/V"] = 0.1
-                scores["Integrator - Residential A/V"] = 0.1
-                scores["Managed Service Provider"] = 0.8
+            lower_text = text.lower()
+            
+            # Look for indications in the text
+            msp_indicators = ["managed service provider", "msp", "it service", "it support"]
+            commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator"]
+            residential_indicators = ["residential a/v", "residential av", "home theater"]
+            
+            msp_mentions = sum(1 for indicator in msp_indicators if indicator in lower_text)
+            commercial_mentions = sum(1 for indicator in commercial_indicators if indicator in lower_text)
+            residential_mentions = sum(1 for indicator in residential_indicators if indicator in lower_text)
+            
+            # Set scores based on mentions
+            if msp_mentions > 0 or commercial_mentions > 0 or residential_mentions > 0:
+                total_mentions = msp_mentions + commercial_mentions + residential_mentions
+                scores["Managed Service Provider"] = 0.1 + (0.7 * msp_mentions / total_mentions if total_mentions > 0 else 0)
+                scores["Integrator - Commercial A/V"] = 0.1 + (0.7 * commercial_mentions / total_mentions if total_mentions > 0 else 0)
+                scores["Integrator - Residential A/V"] = 0.1 + (0.7 * residential_mentions / total_mentions if total_mentions > 0 else 0)
             else:
                 scores["Integrator - Commercial A/V"] = 0.33
                 scores["Integrator - Residential A/V"] = 0.33
@@ -343,14 +365,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         return scores
     
     def _extract_explanation(self, text: str) -> str:
-        """Extract the explanation from the text response.
-        
-        Args:
-            text: The text response from the LLM
-            
-        Returns:
-            The extracted explanation
-        """
+        """Extract the explanation from the text response."""
         # Look for the explanation section
         explanation = ""
         
