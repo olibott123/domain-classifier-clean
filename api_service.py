@@ -136,12 +136,12 @@ def save_to_snowflake(domain, url, content, classification):
             max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
             classification['max_confidence'] = max_confidence
 
-        # Create model metadata with the full explanation (no truncation)
+        # Create model metadata with TRUNCATED explanation to avoid Snowflake error
         llm_explanation = classification.get('llm_explanation', '')
         model_metadata = {
             'model_version': '1.0',
             'llm_model': 'claude-3-haiku-20240307',
-            'llm_explanation': llm_explanation  # No truncation
+            'llm_explanation': llm_explanation[:500] if llm_explanation else ''  # Truncate to 500 chars
         }
         
         logger.info(f"Saving classification to Snowflake: {domain}, {classification['predicted_class']}")
