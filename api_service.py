@@ -168,6 +168,25 @@ def save_to_snowflake(domain, url, content, classification):
         logger.error(f"Error saving to Snowflake: {e}\n{traceback.format_exc()}")
         return False
 
+def extract_domain_from_email(email):
+    """Extract domain from an email address."""
+    try:
+        # Simple validation of email format
+        if not email or '@' not in email:
+            return None
+            
+        # Extract domain portion (after @)
+        domain = email.split('@')[-1].strip().lower()
+        
+        # Basic validation of domain
+        if not domain or '.' not in domain:
+            return None
+            
+        return domain
+    except Exception as e:
+        logger.error(f"Error extracting domain from email: {e}")
+        return None
+
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     """Direct API that classifies a domain and returns the result"""
@@ -239,7 +258,7 @@ def classify_domain():
                         "confidence": existing_record.get('confidence_score'),
                         "confidence_scores": confidence_scores,
                         "explanation": llm_explanation,
-                        "low_confidence": low_confidence,  # Include low_confidence flag
+                        "low_confidence": low_confidence,
                         "source": "cached"
                     }), 200
         
@@ -310,12 +329,80 @@ def classify_domain():
             "confidence": classification.get('max_confidence', 0.0),
             "confidence_scores": classification.get('confidence_scores', {}),
             "explanation": classification.get('llm_explanation', ''),
-            "low_confidence": classification.get('low_confidence', False),  # Include low_confidence flag
+            "low_confidence": classification.get('low_confidence', False),
             "source": "fresh"
         }), 200
         
     except Exception as e:
         logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
+        return jsonify({
+            "error": str(e),
+            "company_type": "Error",
+            "low_confidence": True
+        }), 500
+
+@app.route('/classify-email', methods=['POST', 'OPTIONS'])
+def classify_email():
+    """Classify a domain extracted from an email address"""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        data = request.json
+        email = data.get('email', '').strip()
+        
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+            
+        # Extract domain from email
+        domain = extract_domain_from_email(email)
+        if not domain:
+            return jsonify({"error": "Invalid email format or failed to extract domain"}), 400
+        
+        logger.info(f"Extracted domain '{domain}' from email '{email}'")
+        
+        # Create a new request data with the extracted domain
+        domain_data = {
+            "url": domain,
+            "force_reclassify": data.get('force_reclassify', False)
+        }
+        
+        # Store the original request
+        original_json = request.json
+        
+        # Modify the request object
+        request.json = domain_data
+        
+        # Call the classify_domain function
+        response = classify_domain()
+        
+        # Restore the original request
+        request.json = original_json
+        
+        # If the response is a tuple (response, status_code)
+        if isinstance(response, tuple):
+            response_obj, status_code = response
+            
+            # If successful, add the email to the response
+            if status_code == 200:
+                response_data = json.loads(response_obj.get_data(as_text=True))
+                response_data['email'] = email
+                return jsonify(response_data), 200
+            
+            # Otherwise, just return the original response
+            return response
+            
+        # Handle case where response is not a tuple
+        try:
+            response_data = json.loads(response.get_data(as_text=True))
+            response_data['email'] = email
+            return jsonify(response_data), 200
+        except:
+            return response
+        
+    except Exception as e:
+        logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
         return jsonify({
             "error": str(e),
             "company_type": "Error",
