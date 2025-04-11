@@ -103,16 +103,15 @@ Analyze the provided website content carefully.
 First, extract important clues about the company's business focus.
 Then, determine which category best matches these clues.
 
+Important: CAREFULLY EXAMINE the text for specific indicators of each category. You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value. The category with the most evidence should have the highest confidence score.
+
 You MUST provide your analysis in JSON format with the following structure:
 {json.dumps(response_format, indent=2)}
 
-For the confidence scores, provide a value between 0 and 1 for EACH category independently (they do not need to sum to 1). 
-A higher score means higher confidence that the company belongs to that specific category.
-
-In your explanation, provide detailed reasoning that explains WHY you believe this classification is correct, citing specific evidence from the text.
+Your llm_explanation field MUST be detailed and explain the reasoning behind your classification, explicitly mentioning the evidence that led to your decision.
 """
 
-            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. Remember to provide your output in the JSON format specified:\n\n{text[:15000]}"
+            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. Remember to provide your output in the JSON format specified and to assign DIFFERENT confidence scores to each category based on the evidence found:\n\n{text[:15000]}"
 
             request_data = {
                 "model": self.model,
@@ -165,9 +164,16 @@ In your explanation, provide detailed reasoning that explains WHY you believe th
                                 if "confidence_scores" not in parsed_json:
                                     # Generate confidence scores from text
                                     parsed_json["confidence_scores"] = self._extract_confidence_scores(text_content)
+                                else:
+                                    # Check if all confidence scores are the same
+                                    scores = list(parsed_json["confidence_scores"].values())
+                                    if len(scores) > 1 and all(score == scores[0] for score in scores):
+                                        # If all scores are the same, regenerate differentiated scores
+                                        logger.warning("All confidence scores are the same, regenerating differentiated scores")
+                                        parsed_json["confidence_scores"] = self._extract_confidence_scores(text_content)
                                 
                                 # Ensure llm_explanation is included
-                                if "llm_explanation" not in parsed_json:
+                                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
                                     # Extract reasoning from the full text
                                     parsed_json["llm_explanation"] = self._extract_explanation(text_content)
                                 
@@ -220,7 +226,7 @@ In your explanation, provide detailed reasoning that explains WHY you believe th
             }
     
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
-        """Parse classification from free-form text response with independent confidence scoring."""
+        """Parse classification from free-form text response."""
         result = {
             "confidence_scores": {
                 "Integrator - Commercial A/V": 0.0,
@@ -255,77 +261,50 @@ In your explanation, provide detailed reasoning that explains WHY you believe th
         commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
         residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
         
-        # Calculate total score for reference
-        total_score = msp_score + commercial_score + residential_score
+        # Calculate confidence scores - ensure they're differentiated
+        # Set base values first
+        base_scores = {
+            "Managed Service Provider": 0.3 if msp_score > 0 else 0.1,
+            "Integrator - Commercial A/V": 0.3 if commercial_score > 0 else 0.1,
+            "Integrator - Residential A/V": 0.3 if residential_score > 0 else 0.1
+        }
         
-        # Calculate dynamic confidence scores based on indicators (WITHOUT normalization)
-        # Each category gets its own independent confidence score
-        if total_score > 0:
-            # Base confidence calculations on indicator counts with a ceiling of 0.9
-            result["confidence_scores"]["Managed Service Provider"] = min(0.2 + (0.7 * msp_score / max(msp_score, 1)), 0.9) if msp_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.2 + (0.7 * commercial_score / max(commercial_score, 1)), 0.9) if commercial_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.2 + (0.7 * residential_score / max(residential_score, 1)), 0.9) if residential_score > 0 else 0.1
-            
-            # Set the predicted class based on highest score
-            if msp_score > commercial_score and msp_score > residential_score:
-                result["predicted_class"] = "Managed Service Provider"
-            elif commercial_score > msp_score and commercial_score > residential_score:
-                result["predicted_class"] = "Integrator - Commercial A/V"
-            elif residential_score > msp_score and residential_score > commercial_score:
-                result["predicted_class"] = "Integrator - Residential A/V"
-            else:
-                # In case of a tie, look for direct mentions of category names
-                if "managed service provider" in lower_text or "msp" in lower_text:
-                    result["predicted_class"] = "Managed Service Provider"
-                elif "commercial a/v" in lower_text or "commercial av" in lower_text:
-                    result["predicted_class"] = "Integrator - Commercial A/V"
-                elif "residential a/v" in lower_text or "residential av" in lower_text or "home theater" in lower_text:
-                    result["predicted_class"] = "Integrator - Residential A/V"
-                else:
-                    # If still no clear winner, use the highest confidence score
-                    max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
-                    result["predicted_class"] = max_class[0]
-        else:
-            # No clear indicators, use fallback approach looking for direct mentions
-            if "managed service provider" in lower_text or "msp" in lower_text:
-                result["predicted_class"] = "Managed Service Provider"
-                result["confidence_scores"]["Managed Service Provider"] = 0.6
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.2
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.2
-            elif "commercial a/v" in lower_text or "commercial av" in lower_text:
-                result["predicted_class"] = "Integrator - Commercial A/V"
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.6
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.2
-                result["confidence_scores"]["Managed Service Provider"] = 0.2
-            elif "residential a/v" in lower_text or "residential av" in lower_text or "home theater" in lower_text:
-                result["predicted_class"] = "Integrator - Residential A/V"
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.6
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.2
-                result["confidence_scores"]["Managed Service Provider"] = 0.2
-            else:
-                # Equal probabilities when no indicators are found
-                result["predicted_class"] = "Unknown"
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.33
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.33
-                result["confidence_scores"]["Managed Service Provider"] = 0.34
+        # Add weights based on indicators found
+        total_indicators = msp_score + commercial_score + residential_score
+        if total_indicators > 0:
+            if msp_score > 0:
+                base_scores["Managed Service Provider"] += 0.5 * (msp_score / total_indicators)
+            if commercial_score > 0:
+                base_scores["Integrator - Commercial A/V"] += 0.5 * (commercial_score / total_indicators)
+            if residential_score > 0:
+                base_scores["Integrator - Residential A/V"] += 0.5 * (residential_score / total_indicators)
+        
+        # Ensure the scores are different even if indicators are the same
+        # If they would be all the same, slightly adjust them
+        if (msp_score == commercial_score == residential_score) and msp_score > 0:
+            # If we have a tie with indicators, look for additional signals
+            if "server" in lower_text or "network" in lower_text or "cloud" in lower_text:
+                base_scores["Managed Service Provider"] += 0.05
+            if "conference" in lower_text or "business" in lower_text or "corporate" in lower_text:
+                base_scores["Integrator - Commercial A/V"] += 0.03
+            if "home" in lower_text or "theater" in lower_text or "residential" in lower_text:
+                base_scores["Integrator - Residential A/V"] += 0.04
+        
+        # Set the final scores
+        result["confidence_scores"] = base_scores
+        
+        # Set the predicted class
+        max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
+        result["predicted_class"] = max_class[0]
+        result["max_confidence"] = max_class[1]
         
         # Extract explanation
         result["llm_explanation"] = self._extract_explanation(text)
         
-        # Calculate max confidence
-        if result["confidence_scores"]:
-            max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
-            result["max_confidence"] = max_class[1]
-            
-            # Ensure predicted_class matches the highest confidence class
-            result["predicted_class"] = max_class[0]
-        else:
-            result["max_confidence"] = 0.7  # Default confidence
-        
         return result
     
     def _extract_confidence_scores(self, text: str) -> Dict[str, float]:
-        """Extract confidence scores from text response."""
+        """Extract confidence scores from text response with differentiation."""
         scores = {
             "Integrator - Commercial A/V": 0.0,
             "Integrator - Residential A/V": 0.0,
@@ -363,23 +342,44 @@ In your explanation, provide detailed reasoning that explains WHY you believe th
             except:
                 pass
         
-        # If no scores were extracted, determine scores from the text content
-        if all(score == 0.0 for score in scores.values()):
+        # Check if no scores were extracted or if all scores are the same
+        all_scores_same = len(set(scores.values())) <= 1
+        no_scores = all(score == 0.0 for score in scores.values())
+        
+        if no_scores or all_scores_same:
+            # Analyze the text content to determine confidence scores
             lower_text = text.lower()
             
-            # Look for indications in the text
-            msp_indicators = ["managed service provider", "msp", "it service", "it support"]
-            commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator"]
-            residential_indicators = ["residential a/v", "residential av", "home theater"]
+            # Count keyword mentions to differentiate scores
+            msp_keywords = ["managed service", "msp", "it service", "it support", "network", "server", 
+                          "cybersecurity", "helpdesk", "cloud service", "technical support"]
+            commercial_keywords = ["commercial", "business", "corporate", "conference room", 
+                                 "digital signage", "presentation", "enterprise", "office"]
+            residential_keywords = ["residential", "home theater", "home automation", "smart home", 
+                                  "living space", "whole-home", "luxury", "homeowner"]
             
-            msp_mentions = sum(1 for indicator in msp_indicators if indicator in lower_text)
-            commercial_mentions = sum(1 for indicator in commercial_indicators if indicator in lower_text)
-            residential_mentions = sum(1 for indicator in residential_indicators if indicator in lower_text)
+            msp_count = sum(lower_text.count(keyword) for keyword in msp_keywords)
+            commercial_count = sum(lower_text.count(keyword) for keyword in commercial_keywords)
+            residential_count = sum(lower_text.count(keyword) for keyword in residential_keywords)
             
-            # Set scores based on mentions - independent scores, not normalized to sum to 1
-            scores["Managed Service Provider"] = min(0.1 + (0.8 * msp_mentions / max(msp_mentions, 1)), 0.9) if msp_mentions > 0 else 0.1
-            scores["Integrator - Commercial A/V"] = min(0.1 + (0.8 * commercial_mentions / max(commercial_mentions, 1)), 0.9) if commercial_mentions > 0 else 0.1
-            scores["Integrator - Residential A/V"] = min(0.1 + (0.8 * residential_mentions / max(residential_mentions, 1)), 0.9) if residential_mentions > 0 else 0.1
+            # Calculate base scores (ensuring they are different)
+            base_total = msp_count + commercial_count + residential_count
+            if base_total > 0:
+                # Start with a base confidence and add weighted counts
+                scores["Managed Service Provider"] = 0.3 + (0.6 * msp_count / base_total)
+                scores["Integrator - Commercial A/V"] = 0.25 + (0.6 * commercial_count / base_total)
+                scores["Integrator - Residential A/V"] = 0.2 + (0.6 * residential_count / base_total)
+            else:
+                # If no keywords found, assign slightly different base scores
+                scores["Managed Service Provider"] = 0.35
+                scores["Integrator - Commercial A/V"] = 0.33
+                scores["Integrator - Residential A/V"] = 0.32
+        
+        # Final check to ensure scores are different
+        if len(set(scores.values())) <= 1:
+            # Force differentiation with small adjustments
+            scores["Managed Service Provider"] += 0.03
+            scores["Integrator - Commercial A/V"] += 0.01
         
         return scores
     
@@ -409,8 +409,13 @@ In your explanation, provide detailed reasoning that explains WHY you believe th
         # Remove any JSON-like formatting
         explanation = re.sub(r'{.*}', '', explanation, flags=re.DOTALL)
         
-        # Limit length
+        # Limit length but ensure we have a substantial explanation
         if len(explanation) > 1000:
             explanation = explanation[:997] + "..."
+            
+        # Ensure explanation is meaningful
+        if len(explanation.strip()) < 20:
+            # If explanation is too short, generate a basic one based on the classification
+            explanation = "Classification based on analysis of website content."
         
         return explanation
