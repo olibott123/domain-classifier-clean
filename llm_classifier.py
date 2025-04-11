@@ -70,7 +70,18 @@ class LLMClassifier:
             # Prepare the input for Claude
             domain_context = f" for the website {domain}" if domain else ""
             
-            # Generate a prompt that asks for detailed reasoning
+            # Define the response format we want from Claude
+            response_format = {
+                "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
+                "confidence_scores": {
+                    "Integrator - Commercial A/V": "float between 0 and 1",
+                    "Integrator - Residential A/V": "float between 0 and 1",
+                    "Managed Service Provider": "float between 0 and 1"
+                },
+                "llm_explanation": "A detailed explanation of why this classification was chosen, citing specific evidence from the text"
+            }
+            
+            # Generate a prompt that asks for detailed reasoning and structured output
             system_prompt = f"""You are an expert at classifying companies based on their website content. Your task is to determine whether a company is a:
 
 1. Commercial A/V Integrator - Companies that install audiovisual systems for businesses (conference rooms, offices, etc.)
@@ -91,21 +102,17 @@ Managed Service Provider:
 Analyze the provided website content carefully.
 First, extract important clues about the company's business focus.
 Then, determine which category best matches these clues.
-Provide confidence scores that reflect how strongly the evidence supports each category.
-Most importantly, provide detailed reasoning that explains WHY you believe this classification is correct.
+
+You MUST provide your analysis in JSON format with the following structure:
+{json.dumps(response_format, indent=2)}
+
+For the confidence scores, provide a value between 0 and 1 for EACH category independently (they do not need to sum to 1). 
+A higher score means higher confidence that the company belongs to that specific category.
+
+In your explanation, provide detailed reasoning that explains WHY you believe this classification is correct, citing specific evidence from the text.
 """
 
-            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion:\n\n{text[:15000]}"
-
-            response_format = {
-                "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
-                "confidence_scores": {
-                    "Integrator - Commercial A/V": "float between 0 and 1",
-                    "Integrator - Residential A/V": "float between 0 and 1",
-                    "Managed Service Provider": "float between 0 and 1"
-                },
-                "llm_explanation": "A detailed explanation of why this classification was chosen, citing specific evidence from the text"
-            }
+            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. Remember to provide your output in the JSON format specified:\n\n{text[:15000]}"
 
             request_data = {
                 "model": self.model,
@@ -138,12 +145,12 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
                             text_content = content[0].get("text", "")
                             
                             # Extract the JSON portion from the text response
-                            # Look for structure with predicted_class and confidence_scores
                             try:
                                 # Try to find JSON-like structure in the response
                                 json_str = re.search(r'({.*"predicted_class".*})', text_content, re.DOTALL)
                                 
                                 if not json_str:
+                                    logger.warning("Could not find JSON in LLM response, falling back to text parsing")
                                     # Try to parse free-form text
                                     parsed_result = self._parse_free_text(text_content)
                                     logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
@@ -213,7 +220,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             }
     
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
-        """Parse classification from free-form text response with dynamic confidence scoring."""
+        """Parse classification from free-form text response with independent confidence scoring."""
         result = {
             "confidence_scores": {
                 "Integrator - Commercial A/V": 0.0,
@@ -248,24 +255,18 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
         residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
         
-        # Calculate total score to get proportions
+        # Calculate total score for reference
         total_score = msp_score + commercial_score + residential_score
         
-        # Calculate dynamic confidence scores based on proportion of indicators
+        # Calculate dynamic confidence scores based on indicators (WITHOUT normalization)
+        # Each category gets its own independent confidence score
         if total_score > 0:
-            # Base confidence calculations on relative indicator counts with a minimum value
-            msp_confidence = 0.2 + (0.7 * msp_score / total_score) if msp_score > 0 else 0.1
-            commercial_confidence = 0.2 + (0.7 * commercial_score / total_score) if commercial_score > 0 else 0.1
-            residential_confidence = 0.2 + (0.7 * residential_score / total_score) if residential_score > 0 else 0.1
+            # Base confidence calculations on indicator counts with a ceiling of 0.9
+            result["confidence_scores"]["Managed Service Provider"] = min(0.2 + (0.7 * msp_score / max(msp_score, 1)), 0.9) if msp_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.2 + (0.7 * commercial_score / max(commercial_score, 1)), 0.9) if commercial_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.2 + (0.7 * residential_score / max(residential_score, 1)), 0.9) if residential_score > 0 else 0.1
             
-            # Ensure that scores add up to approximately 1.0 by normalizing
-            total_confidence = msp_confidence + commercial_confidence + residential_confidence
-            if total_confidence > 0:
-                result["confidence_scores"]["Managed Service Provider"] = round(msp_confidence / total_confidence, 2)
-                result["confidence_scores"]["Integrator - Commercial A/V"] = round(commercial_confidence / total_confidence, 2)
-                result["confidence_scores"]["Integrator - Residential A/V"] = round(residential_confidence / total_confidence, 2)
-            
-            # Set the predicted class based on highest confidence
+            # Set the predicted class based on highest score
             if msp_score > commercial_score and msp_score > residential_score:
                 result["predicted_class"] = "Managed Service Provider"
             elif commercial_score > msp_score and commercial_score > residential_score:
@@ -375,16 +376,10 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             commercial_mentions = sum(1 for indicator in commercial_indicators if indicator in lower_text)
             residential_mentions = sum(1 for indicator in residential_indicators if indicator in lower_text)
             
-            # Set scores based on mentions
-            if msp_mentions > 0 or commercial_mentions > 0 or residential_mentions > 0:
-                total_mentions = msp_mentions + commercial_mentions + residential_mentions
-                scores["Managed Service Provider"] = 0.1 + (0.7 * msp_mentions / total_mentions if total_mentions > 0 else 0)
-                scores["Integrator - Commercial A/V"] = 0.1 + (0.7 * commercial_mentions / total_mentions if total_mentions > 0 else 0)
-                scores["Integrator - Residential A/V"] = 0.1 + (0.7 * residential_mentions / total_mentions if total_mentions > 0 else 0)
-            else:
-                scores["Integrator - Commercial A/V"] = 0.33
-                scores["Integrator - Residential A/V"] = 0.33
-                scores["Managed Service Provider"] = 0.34
+            # Set scores based on mentions - independent scores, not normalized to sum to 1
+            scores["Managed Service Provider"] = min(0.1 + (0.8 * msp_mentions / max(msp_mentions, 1)), 0.9) if msp_mentions > 0 else 0.1
+            scores["Integrator - Commercial A/V"] = min(0.1 + (0.8 * commercial_mentions / max(commercial_mentions, 1)), 0.9) if commercial_mentions > 0 else 0.1
+            scores["Integrator - Residential A/V"] = min(0.1 + (0.8 * residential_mentions / max(residential_mentions, 1)), 0.9) if residential_mentions > 0 else 0.1
         
         return scores
     
