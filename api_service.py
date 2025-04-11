@@ -35,6 +35,10 @@ class CustomJSONEncoder(json.JSONEncoder):
 # Configure Flask to use the custom encoder
 app.json_encoder = CustomJSONEncoder
 
+# Configuration
+LOW_CONFIDENCE_THRESHOLD = 0.7  # Threshold below which we consider a classification "low confidence"
+AUTO_RECLASSIFY_THRESHOLD = 0.6  # Threshold below which we automatically reclassify
+
 # Get API keys and settings from environment variables
 APIFY_TASK_ID = os.environ.get("APIFY_TASK_ID")
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN")
@@ -136,6 +140,10 @@ def save_to_snowflake(domain, url, content, classification):
             max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
             classification['max_confidence'] = max_confidence
 
+        # Set low_confidence flag based on confidence threshold
+        if 'low_confidence' not in classification:
+            classification['low_confidence'] = classification['max_confidence'] < LOW_CONFIDENCE_THRESHOLD
+
         # Create model metadata with TRUNCATED explanation to avoid Snowflake error
         llm_explanation = classification.get('llm_explanation', '')
         model_metadata = {
@@ -149,8 +157,8 @@ def save_to_snowflake(domain, url, content, classification):
             domain=domain,
             company_type=str(classification['predicted_class']),
             confidence_score=float(classification['max_confidence']),
-            all_scores=json.dumps(classification.get('confidence_scores', {})),
-            model_metadata=json.dumps(model_metadata),
+            all_scores=json.dumps(classification.get('confidence_scores', {}))[:4000],  # Limit size
+            model_metadata=json.dumps(model_metadata)[:4000],  # Limit size
             low_confidence=bool(classification.get('low_confidence', False)),
             detection_method=str(classification.get('detection_method', 'llm_classification'))
         )
@@ -198,32 +206,42 @@ def classify_domain():
         if not force_reclassify:
             existing_record = snowflake_conn.check_existing_classification(domain)
             if existing_record:
-                logger.info(f"Found existing classification for {domain}")
-                
-                # Extract confidence scores
-                confidence_scores = {}
-                try:
-                    confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
-                except Exception as e:
-                    logger.warning(f"Could not parse all_scores for {domain}: {e}")
-                
-                # Extract LLM explanation
-                llm_explanation = ""
-                try:
-                    metadata = json.loads(existing_record.get('model_metadata', '{}'))
-                    llm_explanation = metadata.get('llm_explanation', '')
-                except Exception as e:
-                    logger.warning(f"Could not parse model_metadata for {domain}: {e}")
-                
-                # Return the cached classification
-                return jsonify({
-                    "domain": domain,
-                    "company_type": existing_record.get('company_type'),
-                    "confidence": existing_record.get('confidence_score'),
-                    "confidence_scores": confidence_scores,
-                    "explanation": llm_explanation,
-                    "source": "cached"
-                }), 200
+                # Check if confidence is below threshold for auto-reclassification
+                confidence_score = existing_record.get('confidence_score', 1.0)
+                if confidence_score < AUTO_RECLASSIFY_THRESHOLD:
+                    logger.info(f"Auto-reclassifying {domain} due to low confidence score: {confidence_score}")
+                    force_reclassify = True
+                else:
+                    logger.info(f"Found existing classification for {domain}")
+                    
+                    # Extract confidence scores
+                    confidence_scores = {}
+                    try:
+                        confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+                    except Exception as e:
+                        logger.warning(f"Could not parse all_scores for {domain}: {e}")
+                    
+                    # Extract LLM explanation
+                    llm_explanation = ""
+                    try:
+                        metadata = json.loads(existing_record.get('model_metadata', '{}'))
+                        llm_explanation = metadata.get('llm_explanation', '')
+                    except Exception as e:
+                        logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+                    
+                    # Add low_confidence flag based on confidence score
+                    low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
+                    
+                    # Return the cached classification
+                    return jsonify({
+                        "domain": domain,
+                        "company_type": existing_record.get('company_type'),
+                        "confidence": existing_record.get('confidence_score'),
+                        "confidence_scores": confidence_scores,
+                        "explanation": llm_explanation,
+                        "low_confidence": low_confidence,  # Include low_confidence flag
+                        "source": "cached"
+                    }), 200
         
         # Try to get content (either from DB or by crawling)
         content = None
@@ -247,7 +265,8 @@ def classify_domain():
                 return jsonify({
                     "domain": domain,
                     "error": "Failed to crawl website",
-                    "company_type": "Unknown"
+                    "company_type": "Unknown",
+                    "low_confidence": True
                 }), 500
         
         # Classify the content
@@ -255,7 +274,8 @@ def classify_domain():
             return jsonify({
                 "domain": domain, 
                 "error": "LLM classifier is not available",
-                "company_type": "Unknown"
+                "company_type": "Unknown",
+                "low_confidence": True
             }), 500
             
         logger.info(f"Classifying content for {domain}")
@@ -265,7 +285,8 @@ def classify_domain():
             return jsonify({
                 "domain": domain,
                 "error": "Classification failed",
-                "company_type": "Unknown"
+                "company_type": "Unknown",
+                "low_confidence": True
             }), 500
         
         # Ensure predicted_class matches highest confidence score
@@ -275,6 +296,9 @@ def classify_domain():
                 max_class = max(confidence_scores.items(), key=lambda x: x[1])
                 classification["predicted_class"] = max_class[0]
                 classification["max_confidence"] = max_class[1]
+        
+        # Set low_confidence flag based on threshold
+        classification["low_confidence"] = classification.get("max_confidence", 0) < LOW_CONFIDENCE_THRESHOLD
         
         # Save to Snowflake (always save, even for reclassifications)
         save_to_snowflake(domain, url, content, classification)
@@ -286,6 +310,7 @@ def classify_domain():
             "confidence": classification.get('max_confidence', 0.0),
             "confidence_scores": classification.get('confidence_scores', {}),
             "explanation": classification.get('llm_explanation', ''),
+            "low_confidence": classification.get('low_confidence', False),  # Include low_confidence flag
             "source": "fresh"
         }), 200
         
@@ -293,7 +318,8 @@ def classify_domain():
         logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
         return jsonify({
             "error": str(e),
-            "company_type": "Error"
+            "company_type": "Error",
+            "low_confidence": True
         }), 500
 
 @app.route('/health', methods=['GET'])
