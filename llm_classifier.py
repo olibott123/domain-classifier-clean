@@ -213,7 +213,7 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
             }
     
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
-        """Parse classification from free-form text response."""
+        """Parse classification from free-form text response with dynamic confidence scoring."""
         result = {
             "confidence_scores": {
                 "Integrator - Commercial A/V": 0.0,
@@ -228,60 +228,81 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         
         # Look for clear statements about the classification
         msp_indicators = ["managed service provider", "msp", "it service", "it support", 
-                         "classify as a managed service", "classify it as a managed service",
-                         "classify as an msp", "classify it as an msp", "would classify it as a managed service",
-                         "would classify it as an msp", "is a managed service provider", "is an msp",
-                         "appears to be a managed service provider", "appears to be an msp"]
-                         
+                     "classify as a managed service", "classify it as a managed service",
+                     "classify as an msp", "classify it as an msp", "would classify it as a managed service",
+                     "would classify it as an msp", "is a managed service provider", "is an msp",
+                     "appears to be a managed service provider", "appears to be an msp"]
+                     
         commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator",
-                               "classify as a commercial", "classify it as a commercial",
-                               "is a commercial a/v integrator", "is a commercial av integrator",
-                               "appears to be a commercial a/v", "appears to be a commercial av"]
-                               
+                           "classify as a commercial", "classify it as a commercial",
+                           "is a commercial a/v integrator", "is a commercial av integrator",
+                           "appears to be a commercial a/v", "appears to be a commercial av"]
+                           
         residential_indicators = ["residential a/v", "residential av", "home theater", 
-                                "classify as a residential", "classify it as a residential",
-                                "is a residential a/v integrator", "is a residential av integrator",
-                                "appears to be a residential a/v", "appears to be a residential av"]
+                            "classify as a residential", "classify it as a residential",
+                            "is a residential a/v integrator", "is a residential av integrator",
+                            "appears to be a residential a/v", "appears to be a residential av"]
         
-        # Check for definitive classification statements
+        # Count indicator matches for each category
         msp_score = sum(1 for indicator in msp_indicators if indicator in lower_text)
         commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
         residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
         
-        # Assign predicted class based on which has the most matching indicators
-        if msp_score > commercial_score and msp_score > residential_score:
-            result["predicted_class"] = "Managed Service Provider"
-            result["confidence_scores"]["Managed Service Provider"] = 0.8
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
-            result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
-        elif commercial_score > msp_score and commercial_score > residential_score:
-            result["predicted_class"] = "Integrator - Commercial A/V"
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.8
-            result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
-            result["confidence_scores"]["Managed Service Provider"] = 0.1
-        elif residential_score > msp_score and residential_score > commercial_score:
-            result["predicted_class"] = "Integrator - Residential A/V"
-            result["confidence_scores"]["Integrator - Residential A/V"] = 0.8
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
-            result["confidence_scores"]["Managed Service Provider"] = 0.1
+        # Calculate total score to get proportions
+        total_score = msp_score + commercial_score + residential_score
+        
+        # Calculate dynamic confidence scores based on proportion of indicators
+        if total_score > 0:
+            # Base confidence calculations on relative indicator counts with a minimum value
+            msp_confidence = 0.2 + (0.7 * msp_score / total_score) if msp_score > 0 else 0.1
+            commercial_confidence = 0.2 + (0.7 * commercial_score / total_score) if commercial_score > 0 else 0.1
+            residential_confidence = 0.2 + (0.7 * residential_score / total_score) if residential_score > 0 else 0.1
+            
+            # Ensure that scores add up to approximately 1.0 by normalizing
+            total_confidence = msp_confidence + commercial_confidence + residential_confidence
+            if total_confidence > 0:
+                result["confidence_scores"]["Managed Service Provider"] = round(msp_confidence / total_confidence, 2)
+                result["confidence_scores"]["Integrator - Commercial A/V"] = round(commercial_confidence / total_confidence, 2)
+                result["confidence_scores"]["Integrator - Residential A/V"] = round(residential_confidence / total_confidence, 2)
+            
+            # Set the predicted class based on highest confidence
+            if msp_score > commercial_score and msp_score > residential_score:
+                result["predicted_class"] = "Managed Service Provider"
+            elif commercial_score > msp_score and commercial_score > residential_score:
+                result["predicted_class"] = "Integrator - Commercial A/V"
+            elif residential_score > msp_score and residential_score > commercial_score:
+                result["predicted_class"] = "Integrator - Residential A/V"
+            else:
+                # In case of a tie, look for direct mentions of category names
+                if "managed service provider" in lower_text or "msp" in lower_text:
+                    result["predicted_class"] = "Managed Service Provider"
+                elif "commercial a/v" in lower_text or "commercial av" in lower_text:
+                    result["predicted_class"] = "Integrator - Commercial A/V"
+                elif "residential a/v" in lower_text or "residential av" in lower_text or "home theater" in lower_text:
+                    result["predicted_class"] = "Integrator - Residential A/V"
+                else:
+                    # If still no clear winner, use the highest confidence score
+                    max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
+                    result["predicted_class"] = max_class[0]
         else:
-            # If no clear winner from indicators, fall back to simple text presence
+            # No clear indicators, use fallback approach looking for direct mentions
             if "managed service provider" in lower_text or "msp" in lower_text:
                 result["predicted_class"] = "Managed Service Provider"
-                result["confidence_scores"]["Managed Service Provider"] = 0.8
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
+                result["confidence_scores"]["Managed Service Provider"] = 0.6
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.2
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.2
             elif "commercial a/v" in lower_text or "commercial av" in lower_text:
                 result["predicted_class"] = "Integrator - Commercial A/V"
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.8
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.1
-                result["confidence_scores"]["Managed Service Provider"] = 0.1
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.6
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.2
+                result["confidence_scores"]["Managed Service Provider"] = 0.2
             elif "residential a/v" in lower_text or "residential av" in lower_text or "home theater" in lower_text:
                 result["predicted_class"] = "Integrator - Residential A/V"
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.8
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.1
-                result["confidence_scores"]["Managed Service Provider"] = 0.1
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.6
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.2
+                result["confidence_scores"]["Managed Service Provider"] = 0.2
             else:
+                # Equal probabilities when no indicators are found
                 result["predicted_class"] = "Unknown"
                 result["confidence_scores"]["Integrator - Commercial A/V"] = 0.33
                 result["confidence_scores"]["Integrator - Residential A/V"] = 0.33
@@ -294,6 +315,9 @@ Most importantly, provide detailed reasoning that explains WHY you believe this 
         if result["confidence_scores"]:
             max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
             result["max_confidence"] = max_class[1]
+            
+            # Ensure predicted_class matches the highest confidence class
+            result["predicted_class"] = max_class[0]
         else:
             result["max_confidence"] = 0.7  # Default confidence
         
