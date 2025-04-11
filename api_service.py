@@ -82,6 +82,25 @@ except Exception as e:
     
     snowflake_conn = FallbackSnowflakeConnector()
 
+def extract_domain_from_email(email):
+    """Extract domain from an email address."""
+    try:
+        # Simple validation of email format
+        if not email or '@' not in email:
+            return None
+            
+        # Extract domain portion (after @)
+        domain = email.split('@')[-1].strip().lower()
+        
+        # Basic validation of domain
+        if not domain or '.' not in domain:
+            return None
+            
+        return domain
+    except Exception as e:
+        logger.error(f"Error extracting domain from email: {e}")
+        return None
+
 def crawl_website(url):
     """Crawl a website using Apify."""
     try:
@@ -168,57 +187,51 @@ def save_to_snowflake(domain, url, content, classification):
         logger.error(f"Error saving to Snowflake: {e}\n{traceback.format_exc()}")
         return False
 
-def extract_domain_from_email(email):
-    """Extract domain from an email address."""
-    try:
-        # Simple validation of email format
-        if not email or '@' not in email:
-            return None
-            
-        # Extract domain portion (after @)
-        domain = email.split('@')[-1].strip().lower()
-        
-        # Basic validation of domain
-        if not domain or '.' not in domain:
-            return None
-            
-        return domain
-    except Exception as e:
-        logger.error(f"Error extracting domain from email: {e}")
-        return None
-
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
-    """Direct API that classifies a domain and returns the result"""
+    """Direct API that classifies a domain or email and returns the result"""
     # Handle preflight requests
     if request.method == 'OPTIONS':
         return '', 204
     
     try:
         data = request.json
-        url = data.get('url', '').strip()
+        input_value = data.get('url', '').strip()
         force_reclassify = data.get('force_reclassify', False)
         
-        if not url:
-            return jsonify({"error": "URL is required"}), 400
-            
-        # Format URL properly
-        if not url.startswith('http'):
-            url = 'https://' + url
-            
-        # Extract domain
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc
+        if not input_value:
+            return jsonify({"error": "URL or email is required"}), 400
+        
+        # Check if input is an email (contains @)
+        is_email = '@' in input_value
+        email = None
+        if is_email:
+            # Extract domain from email
+            email = input_value
+            domain = extract_domain_from_email(email)
+            if not domain:
+                return jsonify({"error": "Invalid email format"}), 400
+            logger.info(f"Extracted domain '{domain}' from email '{email}'")
+        else:
+            # Process as domain/URL
+            # Format URL properly
+            if not input_value.startswith('http'):
+                input_value = 'https://' + input_value
+                
+            # Extract domain
+            parsed_url = urlparse(input_value)
+            domain = parsed_url.netloc
+            if not domain:
+                domain = parsed_url.path
+                
+            # Remove www. if present
+            if domain.startswith('www.'):
+                domain = domain[4:]
+        
         if not domain:
-            domain = parsed_url.path
+            return jsonify({"error": "Invalid URL or email"}), 400
             
-        # Remove www. if present
-        if domain.startswith('www.'):
-            domain = domain[4:]
-            
-        if not domain:
-            return jsonify({"error": "Invalid URL"}), 400
-            
+        url = f"https://{domain}"
         logger.info(f"Processing classification request for {domain}")
         
         # Check for existing classification if not forcing reclassification
@@ -252,7 +265,7 @@ def classify_domain():
                     low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
                     
                     # Return the cached classification
-                    return jsonify({
+                    result = {
                         "domain": domain,
                         "company_type": existing_record.get('company_type'),
                         "confidence": existing_record.get('confidence_score'),
@@ -260,7 +273,13 @@ def classify_domain():
                         "explanation": llm_explanation,
                         "low_confidence": low_confidence,
                         "source": "cached"
-                    }), 200
+                    }
+                    
+                    # Add email to response if input was an email
+                    if email:
+                        result["email"] = email
+                        
+                    return jsonify(result), 200
         
         # Try to get content (either from DB or by crawling)
         content = None
@@ -281,32 +300,50 @@ def classify_domain():
             content = crawl_website(url)
             
             if not content:
-                return jsonify({
+                error_result = {
                     "domain": domain,
                     "error": "Failed to crawl website",
                     "company_type": "Unknown",
                     "low_confidence": True
-                }), 500
+                }
+                
+                # Add email to error response if input was an email
+                if email:
+                    error_result["email"] = email
+                    
+                return jsonify(error_result), 500
         
         # Classify the content
         if not llm_classifier:
-            return jsonify({
+            error_result = {
                 "domain": domain, 
                 "error": "LLM classifier is not available",
                 "company_type": "Unknown",
                 "low_confidence": True
-            }), 500
+            }
+            
+            # Add email to error response if input was an email
+            if email:
+                error_result["email"] = email
+                
+            return jsonify(error_result), 500
             
         logger.info(f"Classifying content for {domain}")
         classification = llm_classifier.classify(content, domain)
         
         if not classification:
-            return jsonify({
+            error_result = {
                 "domain": domain,
                 "error": "Classification failed",
                 "company_type": "Unknown",
                 "low_confidence": True
-            }), 500
+            }
+            
+            # Add email to error response if input was an email
+            if email:
+                error_result["email"] = email
+                
+            return jsonify(error_result), 500
         
         # Ensure predicted_class matches highest confidence score
         if "confidence_scores" in classification:
@@ -322,8 +359,8 @@ def classify_domain():
         # Save to Snowflake (always save, even for reclassifications)
         save_to_snowflake(domain, url, content, classification)
         
-        # Return the classification result
-        return jsonify({
+        # Create the response
+        result = {
             "domain": domain,
             "company_type": classification.get('predicted_class'),
             "confidence": classification.get('max_confidence', 0.0),
@@ -331,7 +368,13 @@ def classify_domain():
             "explanation": classification.get('llm_explanation', ''),
             "low_confidence": classification.get('low_confidence', False),
             "source": "fresh"
-        }), 200
+        }
+        
+        # Add email to response if input was an email
+        if email:
+            result["email"] = email
+            
+        return jsonify(result), 200
         
     except Exception as e:
         logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
@@ -343,7 +386,7 @@ def classify_domain():
 
 @app.route('/classify-email', methods=['POST', 'OPTIONS'])
 def classify_email():
-    """Classify a domain extracted from an email address"""
+    """Alias for classify-domain that redirects email classification requests"""
     # Handle preflight requests
     if request.method == 'OPTIONS':
         return '', 204
@@ -355,134 +398,39 @@ def classify_email():
         if not email:
             return jsonify({"error": "Email is required"}), 400
             
-        # Extract domain from email
-        domain = extract_domain_from_email(email)
-        if not domain:
-            return jsonify({"error": "Invalid email format or failed to extract domain"}), 400
+        # Create a new request with the email as URL
+        new_data = {
+            'url': email,
+            'force_reclassify': data.get('force_reclassify', False)
+        }
         
-        logger.info(f"Extracted domain '{domain}' from email '{email}'")
-        
-        # Create URL for domain
-        url = f"https://{domain}"
-        force_reclassify = data.get('force_reclassify', False)
-        
-        # Check for existing classification if not forcing reclassification
-        if not force_reclassify:
-            existing_record = snowflake_conn.check_existing_classification(domain)
-            if existing_record:
-                # Check if confidence is below threshold for auto-reclassification
-                confidence_score = existing_record.get('confidence_score', 1.0)
-                if confidence_score < AUTO_RECLASSIFY_THRESHOLD:
-                    logger.info(f"Auto-reclassifying {domain} due to low confidence score: {confidence_score}")
-                    force_reclassify = True
-                else:
-                    logger.info(f"Found existing classification for {domain}")
-                    
-                    # Extract confidence scores
-                    confidence_scores = {}
-                    try:
-                        confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
-                    except Exception as e:
-                        logger.warning(f"Could not parse all_scores for {domain}: {e}")
-                    
-                    # Extract LLM explanation
-                    llm_explanation = ""
-                    try:
-                        metadata = json.loads(existing_record.get('model_metadata', '{}'))
-                        llm_explanation = metadata.get('llm_explanation', '')
-                    except Exception as e:
-                        logger.warning(f"Could not parse model_metadata for {domain}: {e}")
-                    
-                    # Add low_confidence flag based on confidence score
-                    low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
-                    
-                    # Return the cached classification - add email to response
-                    response = {
-                        "email": email,
-                        "domain": domain,
-                        "company_type": existing_record.get('company_type'),
-                        "confidence": existing_record.get('confidence_score'),
-                        "confidence_scores": confidence_scores,
-                        "explanation": llm_explanation,
-                        "low_confidence": low_confidence,
-                        "source": "cached"
-                    }
-                    return jsonify(response), 200
-        
-        # Try to get content (either from DB or by crawling)
-        content = None
-        
-        # If reclassifying, try to get existing content first
-        if force_reclassify:
-            try:
-                content = snowflake_conn.get_domain_content(domain)
-                if content:
-                    logger.info(f"Using existing content for {domain}")
-            except (AttributeError, Exception) as e:
-                logger.warning(f"Could not get existing content, will crawl instead: {e}")
-                content = None
-        
-        # If no content yet, crawl the website
-        if not content:
-            logger.info(f"Crawling website for {domain}")
-            content = crawl_website(url)
+        # Forward to classify_domain by calling it directly with the new data
+        # Use actual request for context but modify just the .json attribute
+        # We need to be careful to use a copy and not modify the actual request
+        original_json = request.json
+        try:
+            # Store the original json and use a context-like pattern
+            _temp_request_json = new_data
             
-            if not content:
-                return jsonify({
-                    "email": email,
-                    "domain": domain,
-                    "error": "Failed to crawl website",
-                    "company_type": "Unknown",
-                    "low_confidence": True
-                }), 500
-        
-        # Classify the content
-        if not llm_classifier:
-            return jsonify({
-                "email": email,
-                "domain": domain, 
-                "error": "LLM classifier is not available",
-                "company_type": "Unknown",
-                "low_confidence": True
-            }), 500
+            # Since we can't modify request.json directly,
+            # we'll monkey patch the request.get_json function temporarily
+            original_get_json = request.get_json
             
-        logger.info(f"Classifying content for {domain}")
-        classification = llm_classifier.classify(content, domain)
-        
-        if not classification:
-            return jsonify({
-                "email": email,
-                "domain": domain,
-                "error": "Classification failed",
-                "company_type": "Unknown",
-                "low_confidence": True
-            }), 500
-        
-        # Ensure predicted_class matches highest confidence score
-        if "confidence_scores" in classification:
-            confidence_scores = classification["confidence_scores"]
-            if confidence_scores:
-                max_class = max(confidence_scores.items(), key=lambda x: x[1])
-                classification["predicted_class"] = max_class[0]
-                classification["max_confidence"] = max_class[1]
-        
-        # Set low_confidence flag based on threshold
-        classification["low_confidence"] = classification.get("max_confidence", 0) < LOW_CONFIDENCE_THRESHOLD
-        
-        # Save to Snowflake (always save, even for reclassifications)
-        save_to_snowflake(domain, url, content, classification)
-        
-        # Return the classification result with email added
-        return jsonify({
-            "email": email,
-            "domain": domain,
-            "company_type": classification.get('predicted_class'),
-            "confidence": classification.get('max_confidence', 0.0),
-            "confidence_scores": classification.get('confidence_scores', {}),
-            "explanation": classification.get('llm_explanation', ''),
-            "low_confidence": classification.get('low_confidence', False),
-            "source": "fresh"
-        }), 200
+            def patched_get_json(*args, **kwargs):
+                return _temp_request_json
+                
+            request.get_json = patched_get_json
+            
+            # Now call classify_domain, which will use our patched get_json
+            result = classify_domain()
+            
+            # Return the result directly
+            return result
+            
+        finally:
+            # Restore original get_json
+            if 'original_get_json' in locals():
+                request.get_json = original_get_json
         
     except Exception as e:
         logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
