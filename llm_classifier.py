@@ -55,6 +55,50 @@ class LLMClassifier:
                 "Often discusses SLAs, uptime guarantees, or managed security services"
             ]
         }
+        
+        # Domain parking and minimal content phrases
+        self.parking_phrases = [
+            "domain is for sale", "buy this domain", "purchase this domain", 
+            "domain may be for sale", "check back soon", "coming soon",
+            "website coming soon", "site is under construction", "under construction",
+            "parked domain", "web hosting", "domain registration", "godaddy",
+            "namecheap", "bluehost", "hostgator", "domain parking", "this webpage is parked",
+            "this domain is parked", "domain parking page"
+        ]
+    
+    def detect_parked_domain(self, text: str) -> bool:
+        """Detect if a domain appears to be parked or has minimal content."""
+        if not text or len(text.strip()) < 100:
+            logger.info("Domain has very little content (less than 100 chars)")
+            return True
+            
+        lower_text = text.lower()
+        
+        # Check for parking phrases
+        for phrase in self.parking_phrases:
+            if phrase in lower_text:
+                logger.info(f"Domain appears to be parked (detected '{phrase}')")
+                return True
+        
+        # Check if content is too generic (not enough specific terms)
+        word_count = len(re.findall(r'\b\w+\b', text))
+        unique_words = len(set(re.findall(r'\b\w+\b', lower_text)))
+        
+        if word_count < 50:
+            logger.info(f"Domain has only {word_count} words, likely minimal content")
+            return True
+            
+        if unique_words < 30:
+            logger.info(f"Domain has only {unique_words} unique words, likely generic content")
+            return True
+        
+        # Check for lack of company-specific content
+        business_terms = ['company', 'business', 'service', 'product', 'client', 'customer', 'contact', 'about us']
+        if not any(term in lower_text for term in business_terms):
+            logger.info("Domain lacks basic business terms, likely not a real company site")
+            return True
+        
+        return False
     
     def classify(self, text: str, domain: str = None) -> Dict[str, Any]:
         """Classify website text using Claude.
@@ -66,6 +110,21 @@ class LLMClassifier:
         Returns:
             Dict containing classification results
         """
+        # First check if this is a parked domain or has minimal content
+        if self.detect_parked_domain(text):
+            logger.warning(f"Domain {domain} appears to be parked or has minimal content")
+            return {
+                "predicted_class": "Unknown",
+                "confidence_scores": {
+                    "Integrator - Commercial A/V": 0.05,
+                    "Integrator - Residential A/V": 0.05,
+                    "Managed Service Provider": 0.05
+                },
+                "max_confidence": 0.05,
+                "llm_explanation": "This domain appears to be parked or has minimal content. It may be a placeholder, under construction, or for sale. There is insufficient information to determine the company type.",
+                "detection_method": "minimal_content_detection"
+            }
+            
         try:
             # Prepare the input for Claude
             domain_context = f" for the website {domain}" if domain else ""
@@ -99,19 +158,19 @@ Residential A/V Integrator:
 Managed Service Provider:
 - {chr(10).join(self.categories["Managed Service Provider"])}
 
-Analyze the provided website content carefully.
-First, extract important clues about the company's business focus.
-Then, determine which category best matches these clues.
+Analyze the provided website content carefully. If there is insufficient content to make a classification, state this explicitly and assign low confidence scores.
 
-Important: CAREFULLY EXAMINE the text for specific indicators of each category. You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value. The category with the most evidence should have the highest confidence score.
+VERY IMPORTANT: Your explanation MUST be detailed (at least 3-4 sentences) and reference SPECIFIC evidence from the text that supports your classification. Generic explanations are not acceptable.
+
+Also CRITICAL: If the website content is minimal, generic, or doesn't clearly indicate the company's business, assign LOW confidence scores (below 0.3) to ALL categories and make sure your explanation notes the lack of clear evidence.
+
+You MUST provide DIFFERENT confidence scores for each category - they should NOT all be the same value. The category with the most evidence should have the highest confidence score.
 
 You MUST provide your analysis in JSON format with the following structure:
 {json.dumps(response_format, indent=2)}
-
-Your llm_explanation field MUST be detailed and explain the reasoning behind your classification, explicitly mentioning the evidence that led to your decision.
 """
 
-            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. Remember to provide your output in the JSON format specified and to assign DIFFERENT confidence scores to each category based on the evidence found:\n\n{text[:15000]}"
+            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. If the content is minimal or generic, explicitly state this and assign low confidence scores. Your explanation must cite specific phrases or terms from the website content:\n\n{text[:15000]}"
 
             request_data = {
                 "model": self.model,
@@ -119,7 +178,7 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
                 "messages": [
                     {"role": "user", "content": user_prompt}
                 ],
-                "max_tokens": 1000,
+                "max_tokens": 1500,  # Increased to allow for longer explanations
                 "temperature": 0.0
             }
             
@@ -172,10 +231,13 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
                                         logger.warning("All confidence scores are the same, regenerating differentiated scores")
                                         parsed_json["confidence_scores"] = self._extract_confidence_scores(text_content)
                                 
-                                # Ensure llm_explanation is included
-                                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
+                                # Ensure llm_explanation is included and has substance
+                                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"] or len(parsed_json["llm_explanation"].strip()) < 50:
                                     # Extract reasoning from the full text
                                     parsed_json["llm_explanation"] = self._extract_explanation(text_content)
+                                    # If still too short, flag it
+                                    if len(parsed_json["llm_explanation"].strip()) < 50:
+                                        logger.warning("Explanation is too short, may not be useful")
                                 
                                 # Ensure predicted_class matches highest confidence score
                                 confidence_scores = parsed_json.get("confidence_scores", {})
@@ -188,6 +250,16 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
                                     
                                 # Set detection method
                                 parsed_json["detection_method"] = "llm_classification"
+                                
+                                # Log the explanation length for debugging
+                                logger.info(f"Explanation length: {len(parsed_json.get('llm_explanation', ''))}")
+                                
+                                # Verify the explanation doesn't have the generic message
+                                if "Classification based on analysis of website content" in parsed_json.get("llm_explanation", ""):
+                                    logger.warning("Generic explanation detected, trying to extract better explanation")
+                                    better_explanation = self._try_extract_better_explanation(text_content)
+                                    if better_explanation:
+                                        parsed_json["llm_explanation"] = better_explanation
                                 
                                 return parsed_json
                             except Exception as e:
@@ -225,6 +297,36 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
                 "detection_method": "llm_classification_failed"
             }
     
+    def _try_extract_better_explanation(self, text: str) -> str:
+        """Try to extract a better explanation from the full response text."""
+        # Look for sentences that might contain reasoning
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        reasoning_sentences = []
+        
+        # Keywords that might indicate reasoning or explanation
+        reasoning_keywords = [
+            "because", "since", "reason", "evidence", "indicates", "suggests",
+            "mentions", "references", "focuses on", "specializes in", "offers",
+            "provides", "features", "highlights", "exhibits", "demonstrates",
+            "I found", "I noticed", "I observed", "appears to be", "based on",
+            "website contains", "content shows", "text mentions"
+        ]
+        
+        # Collect sentences that might be part of an explanation
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence and any(keyword in sentence.lower() for keyword in reasoning_keywords):
+                reasoning_sentences.append(sentence)
+        
+        # If we found some reasoning sentences, combine them
+        if reasoning_sentences:
+            explanation = " ".join(reasoning_sentences)
+            if len(explanation) > 50:  # Ensure it's substantial
+                return explanation
+        
+        # If we can't extract a better explanation, return None
+        return None
+    
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
         """Parse classification from free-form text response."""
         result = {
@@ -238,6 +340,24 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
         
         # First, examine the explanation to identify the main classification
         lower_text = text.lower()
+        
+        # Check for indications of minimal content
+        minimal_content_phrases = [
+            "not enough information", "insufficient information", "insufficient content",
+            "minimal content", "limited content", "not enough content", "lack of content",
+            "generic content", "generic landing page", "placeholder", "parked domain"
+        ]
+        
+        if any(phrase in lower_text for phrase in minimal_content_phrases):
+            logger.info("LLM response indicates minimal content")
+            result["predicted_class"] = "Unknown"
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.05
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.05
+            result["confidence_scores"]["Managed Service Provider"] = 0.05
+            result["max_confidence"] = 0.05
+            result["llm_explanation"] = "There is insufficient content on this website to determine the company type. The website may be a generic landing page, parked domain, or under construction."
+            result["detection_method"] = "minimal_content_detection"
+            return result
         
         # Look for clear statements about the classification
         msp_indicators = ["managed service provider", "msp", "it service", "it support", 
@@ -298,7 +418,7 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
         result["predicted_class"] = max_class[0]
         result["max_confidence"] = max_class[1]
         
-        # Extract explanation
+        # Extract explanation - try to get a substantial one
         result["llm_explanation"] = self._extract_explanation(text)
         
         return result
@@ -310,6 +430,22 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
             "Integrator - Residential A/V": 0.0,
             "Managed Service Provider": 0.0
         }
+        
+        # Check for insufficient content indicators
+        insufficient_content_indicators = [
+            "not enough information", "insufficient information", "insufficient content",
+            "minimal content", "limited content", "not enough content", "lack of content",
+            "generic content", "generic landing page", "placeholder", "parked domain"
+        ]
+        
+        if any(indicator in text.lower() for indicator in insufficient_content_indicators):
+            # Set very low confidence for all categories
+            scores = {
+                "Integrator - Commercial A/V": 0.05,
+                "Integrator - Residential A/V": 0.05,
+                "Managed Service Provider": 0.05
+            }
+            return scores
         
         # Look for explicit confidence values
         # Check for Commercial A/V confidence
@@ -384,7 +520,7 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
         return scores
     
     def _extract_explanation(self, text: str) -> str:
-        """Extract the explanation from the text response."""
+        """Extract a detailed explanation from the text response."""
         # Look for the explanation section
         explanation = ""
         
@@ -401,21 +537,47 @@ Your llm_explanation field MUST be detailed and explain the reasoning behind you
                     explanation = parts[1].strip()
                     break
         
-        # If no marker found, use the entire text
-        if not explanation:
+        # If no marker found, try extracting sentences with reasoning keywords
+        if not explanation or len(explanation) < 50:
+            reasoned_explanation = self._try_extract_better_explanation(text)
+            if reasoned_explanation:
+                explanation = reasoned_explanation
+        
+        # If still no good explanation, use the full text
+        if not explanation or len(explanation) < 50:
             explanation = text
         
         # Clean up the explanation
         # Remove any JSON-like formatting
         explanation = re.sub(r'{.*}', '', explanation, flags=re.DOTALL)
         
+        # Check for meaningfulness
+        if len(explanation.strip()) < 50 or "Classification based on analysis of website content" in explanation:
+            # Find sentences with reasoning language
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            meaningful_sentences = []
+            
+            reasoning_terms = ["because", "since", "reason", "evidence", "indicates", "suggests", 
+                             "mentions", "refers", "includes", "describes", "shows", "offers"]
+            
+            for sentence in sentences:
+                if any(term in sentence.lower() for term in reasoning_terms):
+                    meaningful_sentences.append(sentence)
+            
+            if meaningful_sentences:
+                explanation = " ".join(meaningful_sentences)
+        
         # Limit length but ensure we have a substantial explanation
         if len(explanation) > 1000:
             explanation = explanation[:997] + "..."
             
         # Ensure explanation is meaningful
-        if len(explanation.strip()) < 20:
-            # If explanation is too short, generate a basic one based on the classification
-            explanation = "Classification based on analysis of website content."
+        if len(explanation.strip()) < 50:
+            # Check if text indicates minimal content
+            if any(phrase in text.lower() for phrase in ["insufficient content", "minimal content", "limited content"]):
+                explanation = "This website appears to have insufficient content to make a reliable classification. The content is minimal, generic, or lacks industry-specific terminology that would allow for confident categorization."
+            else:
+                # If explanation is still too short, generate a basic one based on the classification
+                explanation = "Classification based on analysis of website content. Unable to extract specific reasoning from the analysis."
         
         return explanation
