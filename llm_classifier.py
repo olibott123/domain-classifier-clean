@@ -99,6 +99,14 @@ class LLMClassifier:
             return True
         
         return False
+
+    def clean_json_string(self, json_str):
+        """Clean a JSON string by removing control characters and fixing common issues."""
+        # Replace common control characters
+        cleaned = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
+        # Fix unescaped quotes within strings (but not in valid syntax locations)
+        cleaned = re.sub(r'([^\\])"([^{}\[\],:"\\])', r'\1\"\2', cleaned)
+        return cleaned
     
     def classify(self, text: str, domain: str = None) -> Dict[str, Any]:
         """Classify website text using Claude.
@@ -116,11 +124,11 @@ class LLMClassifier:
             return {
                 "predicted_class": "Unknown",
                 "confidence_scores": {
-                    "Integrator - Commercial A/V": 0.05,
-                    "Integrator - Residential A/V": 0.05,
-                    "Managed Service Provider": 0.05
+                    "Integrator - Commercial A/V": 5,
+                    "Integrator - Residential A/V": 5,
+                    "Managed Service Provider": 5
                 },
-                "max_confidence": 0.05,
+                "max_confidence": 5,
                 "llm_explanation": "This domain appears to be parked or has minimal content. It may be a placeholder, under construction, or for sale. There is insufficient information to determine the company type.",
                 "detection_method": "minimal_content_detection"
             }
@@ -129,18 +137,7 @@ class LLMClassifier:
             # Prepare the input for Claude
             domain_context = f" for the website {domain}" if domain else ""
             
-            # Define the response format we want from Claude
-            response_format = {
-                "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
-                "confidence_scores": {
-                    "Integrator - Commercial A/V": "float between 0 and 1",
-                    "Integrator - Residential A/V": "float between 0 and 1",
-                    "Managed Service Provider": "float between 0 and 1"
-                },
-                "llm_explanation": "A detailed explanation of why this classification was chosen, citing specific evidence from the text"
-            }
-            
-            # Generate a prompt that asks for detailed reasoning and structured output
+            # Generate a prompt that asks for detailed reasoning
             system_prompt = f"""You are an expert at classifying companies based on their website content. Your task is to determine whether a company is a:
 
 1. Commercial A/V Integrator - Companies that install audiovisual systems for businesses (conference rooms, offices, etc.)
@@ -158,19 +155,28 @@ Residential A/V Integrator:
 Managed Service Provider:
 - {chr(10).join(self.categories["Managed Service Provider"])}
 
-Analyze the provided website content carefully. If there is insufficient content to make a classification, state this explicitly and assign low confidence scores.
+Analyze the provided website content carefully. You must:
+1. Use the specific characteristics described above to determine the company type
+2. Assign confidence scores (from 1-100) for EACH category based on the evidence found
+3. Provide DIFFERENT confidence scores for each category - they should not all be the same
+4. Base your scores on the STRENGTH of evidence, not preconceived biases
+5. Write a detailed explanation citing SPECIFIC evidence from the text
 
-VERY IMPORTANT: Your explanation MUST be detailed (at least 3-4 sentences) and reference SPECIFIC evidence from the text that supports your classification. Generic explanations are not acceptable.
+Your response must be a JSON object with the following structure:
+{
+  "predicted_class": "The category with the highest confidence score",
+  "confidence_scores": {
+    "Integrator - Commercial A/V": Integer from 1-100,
+    "Integrator - Residential A/V": Integer from 1-100,
+    "Managed Service Provider": Integer from 1-100
+  },
+  "llm_explanation": "Your detailed explanation with specific evidence from the text"
+}
 
-Also CRITICAL: If the website content is minimal, generic, or doesn't clearly indicate the company's business, assign LOW confidence scores (below 0.3) to ALL categories and make sure your explanation notes the lack of clear evidence.
-
-You MUST provide DIFFERENT confidence scores for each category - they should NOT all be the same value. The category with the most evidence should have the highest confidence score.
-
-You MUST provide your analysis in JSON format with the following structure:
-{json.dumps(response_format, indent=2)}
+If the website has insufficient content, assign LOW scores to all categories (below 30) and explain the lack of clear evidence.
 """
 
-            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning in detail. Focus on specific evidence from the text that supports your conclusion. If the content is minimal or generic, explicitly state this and assign low confidence scores. Your explanation must cite specific phrases or terms from the website content:\n\n{text[:15000]}"
+            user_prompt = f"Based on the following website content{domain_context}, classify the company and explain your reasoning. Remember to assign confidence scores from 1-100 for each category based on specific evidence found:\n\n{text[:15000]}"
 
             request_data = {
                 "model": self.model,
@@ -178,7 +184,7 @@ You MUST provide your analysis in JSON format with the following structure:
                 "messages": [
                     {"role": "user", "content": user_prompt}
                 ],
-                "max_tokens": 1500,  # Increased to allow for longer explanations
+                "max_tokens": 1500,
                 "temperature": 0.0
             }
             
@@ -205,61 +211,88 @@ You MUST provide your analysis in JSON format with the following structure:
                             # Extract the JSON portion from the text response
                             try:
                                 # Try to find JSON-like structure in the response
-                                json_str = re.search(r'({.*"predicted_class".*})', text_content, re.DOTALL)
+                                json_match = re.search(r'({.*?"predicted_class".*?})', text_content, re.DOTALL)
                                 
-                                if not json_str:
+                                if not json_match:
                                     logger.warning("Could not find JSON in LLM response, falling back to text parsing")
                                     # Try to parse free-form text
                                     parsed_result = self._parse_free_text(text_content)
                                     logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
                                     return parsed_result
                                 
-                                parsed_json = json.loads(json_str.group(1))
+                                # Try to clean and parse the JSON
+                                try:
+                                    json_str = json_match.group(1)
+                                    cleaned_json = self.clean_json_string(json_str)
+                                    parsed_json = json.loads(cleaned_json)
+                                except Exception as e:
+                                    logger.error(f"Error parsing cleaned JSON: {e}")
+                                    # Fall back to text parsing
+                                    parsed_result = self._parse_free_text(text_content)
+                                    return parsed_result
                                 
+                                # Validate and process JSON fields
                                 # Ensure all required fields are present
                                 if "predicted_class" not in parsed_json:
-                                    raise ValueError("Missing predicted_class in response")
+                                    logger.warning("Missing predicted_class in JSON response")
+                                    parsed_json["predicted_class"] = "Unknown"
                                 
+                                # Handle confidence scores
                                 if "confidence_scores" not in parsed_json:
+                                    logger.warning("Missing confidence_scores in JSON response")
                                     # Generate confidence scores from text
                                     parsed_json["confidence_scores"] = self._extract_confidence_scores(text_content)
                                 else:
-                                    # Check if all confidence scores are the same
-                                    scores = list(parsed_json["confidence_scores"].values())
-                                    if len(scores) > 1 and all(score == scores[0] for score in scores):
-                                        # If all scores are the same, regenerate differentiated scores
-                                        logger.warning("All confidence scores are the same, regenerating differentiated scores")
-                                        parsed_json["confidence_scores"] = self._extract_confidence_scores(text_content)
+                                    # Check and normalize confidence scores to ensure they're integers 1-100
+                                    confidence_scores = parsed_json["confidence_scores"]
+                                    normalized_scores = {}
+                                    
+                                    for category, score in confidence_scores.items():
+                                        # Convert float to int if needed
+                                        if isinstance(score, float):
+                                            # If score appears to be 0-1 scale, convert to 1-100
+                                            if 0 <= score <= 1:
+                                                score = int(score * 100)
+                                            else:
+                                                score = int(score)
+                                        
+                                        # Ensure score is within 1-100 range
+                                        score = max(1, min(100, score))
+                                        normalized_scores[category] = score
+                                    
+                                    parsed_json["confidence_scores"] = normalized_scores
                                 
-                                # Ensure llm_explanation is included and has substance
-                                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"] or len(parsed_json["llm_explanation"].strip()) < 50:
+                                # Check if all confidence scores are the same
+                                scores = list(parsed_json["confidence_scores"].values())
+                                if len(scores) > 1 and all(score == scores[0] for score in scores):
+                                    logger.warning("All confidence scores are the same, adjusting for differentiation")
+                                    # Slightly adjust scores to ensure they're different
+                                    categories = list(parsed_json["confidence_scores"].keys())
+                                    parsed_json["confidence_scores"][categories[0]] = max(1, min(100, scores[0] - 1))
+                                    parsed_json["confidence_scores"][categories[2]] = max(1, min(100, scores[0] + 1))
+                                
+                                # Ensure llm_explanation is included
+                                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
+                                    logger.warning("Missing llm_explanation in JSON response")
                                     # Extract reasoning from the full text
                                     parsed_json["llm_explanation"] = self._extract_explanation(text_content)
-                                    # If still too short, flag it
-                                    if len(parsed_json["llm_explanation"].strip()) < 50:
-                                        logger.warning("Explanation is too short, may not be useful")
                                 
-                                # Ensure predicted_class matches highest confidence score
-                                confidence_scores = parsed_json.get("confidence_scores", {})
+                                # Calculate max confidence score and ensure predicted_class is consistent
+                                confidence_scores = parsed_json["confidence_scores"]
                                 if confidence_scores:
                                     max_class = max(confidence_scores.items(), key=lambda x: x[1])
                                     parsed_json["predicted_class"] = max_class[0]
                                     parsed_json["max_confidence"] = max_class[1]
                                 else:
-                                    parsed_json["max_confidence"] = 0.7  # Default confidence
-                                    
+                                    logger.warning("No confidence scores available")
+                                    parsed_json["max_confidence"] = 50  # Default confidence
+                                
                                 # Set detection method
                                 parsed_json["detection_method"] = "llm_classification"
                                 
                                 # Log the explanation length for debugging
-                                logger.info(f"Explanation length: {len(parsed_json.get('llm_explanation', ''))}")
-                                
-                                # Verify the explanation doesn't have the generic message
-                                if "Classification based on analysis of website content" in parsed_json.get("llm_explanation", ""):
-                                    logger.warning("Generic explanation detected, trying to extract better explanation")
-                                    better_explanation = self._try_extract_better_explanation(text_content)
-                                    if better_explanation:
-                                        parsed_json["llm_explanation"] = better_explanation
+                                if "llm_explanation" in parsed_json:
+                                    logger.info(f"Explanation length: {len(parsed_json['llm_explanation'])}")
                                 
                                 return parsed_json
                             except Exception as e:
@@ -288,58 +321,25 @@ You MUST provide your analysis in JSON format with the following structure:
             return {
                 "predicted_class": "Unknown",
                 "confidence_scores": {
-                    "Integrator - Commercial A/V": 0.0,
-                    "Integrator - Residential A/V": 0.0,
-                    "Managed Service Provider": 0.0
+                    "Integrator - Commercial A/V": 5,
+                    "Integrator - Residential A/V": 5,
+                    "Managed Service Provider": 5
                 },
-                "max_confidence": 0.0,
+                "max_confidence": 5,
                 "llm_explanation": f"Classification failed due to an error: {str(e)}",
                 "detection_method": "llm_classification_failed"
             }
-    
-    def _try_extract_better_explanation(self, text: str) -> str:
-        """Try to extract a better explanation from the full response text."""
-        # Look for sentences that might contain reasoning
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        reasoning_sentences = []
-        
-        # Keywords that might indicate reasoning or explanation
-        reasoning_keywords = [
-            "because", "since", "reason", "evidence", "indicates", "suggests",
-            "mentions", "references", "focuses on", "specializes in", "offers",
-            "provides", "features", "highlights", "exhibits", "demonstrates",
-            "I found", "I noticed", "I observed", "appears to be", "based on",
-            "website contains", "content shows", "text mentions"
-        ]
-        
-        # Collect sentences that might be part of an explanation
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if sentence and any(keyword in sentence.lower() for keyword in reasoning_keywords):
-                reasoning_sentences.append(sentence)
-        
-        # If we found some reasoning sentences, combine them
-        if reasoning_sentences:
-            explanation = " ".join(reasoning_sentences)
-            if len(explanation) > 50:  # Ensure it's substantial
-                return explanation
-        
-        # If we can't extract a better explanation, return None
-        return None
     
     def _parse_free_text(self, text: str) -> Dict[str, Any]:
         """Parse classification from free-form text response."""
         result = {
             "confidence_scores": {
-                "Integrator - Commercial A/V": 0.0,
-                "Integrator - Residential A/V": 0.0,
-                "Managed Service Provider": 0.0
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0,
+                "Managed Service Provider": 0
             },
             "llm_explanation": ""
         }
-        
-        # First, examine the explanation to identify the main classification
-        lower_text = text.lower()
         
         # Check for indications of minimal content
         minimal_content_phrases = [
@@ -348,70 +348,106 @@ You MUST provide your analysis in JSON format with the following structure:
             "generic content", "generic landing page", "placeholder", "parked domain"
         ]
         
-        if any(phrase in lower_text for phrase in minimal_content_phrases):
+        if any(phrase in text.lower() for phrase in minimal_content_phrases):
             logger.info("LLM response indicates minimal content")
             result["predicted_class"] = "Unknown"
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.05
-            result["confidence_scores"]["Integrator - Residential A/V"] = 0.05
-            result["confidence_scores"]["Managed Service Provider"] = 0.05
-            result["max_confidence"] = 0.05
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 5
+            result["confidence_scores"]["Integrator - Residential A/V"] = 5
+            result["confidence_scores"]["Managed Service Provider"] = 5
+            result["max_confidence"] = 5
             result["llm_explanation"] = "There is insufficient content on this website to determine the company type. The website may be a generic landing page, parked domain, or under construction."
             result["detection_method"] = "minimal_content_detection"
             return result
         
-        # Look for clear statements about the classification
-        msp_indicators = ["managed service provider", "msp", "it service", "it support", 
-                     "classify as a managed service", "classify it as a managed service",
-                     "classify as an msp", "classify it as an msp", "would classify it as a managed service",
-                     "would classify it as an msp", "is a managed service provider", "is an msp",
-                     "appears to be a managed service provider", "appears to be an msp"]
-                     
-        commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator",
-                           "classify as a commercial", "classify it as a commercial",
-                           "is a commercial a/v integrator", "is a commercial av integrator",
-                           "appears to be a commercial a/v", "appears to be a commercial av"]
-                           
-        residential_indicators = ["residential a/v", "residential av", "home theater", 
-                            "classify as a residential", "classify it as a residential",
-                            "is a residential a/v integrator", "is a residential av integrator",
-                            "appears to be a residential a/v", "appears to be a residential av"]
+        # First, examine the explanation to identify the main classification
+        lower_text = text.lower()
         
-        # Count indicator matches for each category
-        msp_score = sum(1 for indicator in msp_indicators if indicator in lower_text)
-        commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
-        residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
+        # Look for confidence score statements
+        # Pattern like "70% confidence" or "confidence score of 70" or "70/100"
+        commercial_confidence = self._extract_numeric_confidence("commercial a/v", lower_text)
+        residential_confidence = self._extract_numeric_confidence("residential a/v", lower_text)
+        msp_confidence = self._extract_numeric_confidence("managed service provider", lower_text)
         
-        # Calculate confidence scores - ensure they're differentiated
-        # Set base values first
-        base_scores = {
-            "Managed Service Provider": 0.3 if msp_score > 0 else 0.1,
-            "Integrator - Commercial A/V": 0.3 if commercial_score > 0 else 0.1,
-            "Integrator - Residential A/V": 0.3 if residential_score > 0 else 0.1
-        }
+        # Check if we found explicit confidence scores
+        scores_found = (commercial_confidence > 0 or residential_confidence > 0 or msp_confidence > 0)
         
-        # Add weights based on indicators found
-        total_indicators = msp_score + commercial_score + residential_score
-        if total_indicators > 0:
-            if msp_score > 0:
-                base_scores["Managed Service Provider"] += 0.5 * (msp_score / total_indicators)
-            if commercial_score > 0:
-                base_scores["Integrator - Commercial A/V"] += 0.5 * (commercial_score / total_indicators)
-            if residential_score > 0:
-                base_scores["Integrator - Residential A/V"] += 0.5 * (residential_score / total_indicators)
-        
-        # Ensure the scores are different even if indicators are the same
-        # If they would be all the same, slightly adjust them
-        if (msp_score == commercial_score == residential_score) and msp_score > 0:
-            # If we have a tie with indicators, look for additional signals
-            if "server" in lower_text or "network" in lower_text or "cloud" in lower_text:
-                base_scores["Managed Service Provider"] += 0.05
-            if "conference" in lower_text or "business" in lower_text or "corporate" in lower_text:
-                base_scores["Integrator - Commercial A/V"] += 0.03
-            if "home" in lower_text or "theater" in lower_text or "residential" in lower_text:
-                base_scores["Integrator - Residential A/V"] += 0.04
+        if not scores_found:
+            # Look for clear statements about the classification
+            msp_indicators = ["managed service provider", "msp", "it service", "it support", 
+                         "classify as a managed service", "classify it as a managed service",
+                         "classify as an msp", "classify it as an msp", "would classify it as a managed service",
+                         "would classify it as an msp", "is a managed service provider", "is an msp",
+                         "appears to be a managed service provider", "appears to be an msp"]
+                         
+            commercial_indicators = ["commercial a/v", "commercial av", "commercial integrator",
+                               "classify as a commercial", "classify it as a commercial",
+                               "is a commercial a/v integrator", "is a commercial av integrator",
+                               "appears to be a commercial a/v", "appears to be a commercial av"]
+                               
+            residential_indicators = ["residential a/v", "residential av", "home theater", 
+                                "classify as a residential", "classify it as a residential",
+                                "is a residential a/v integrator", "is a residential av integrator",
+                                "appears to be a residential a/v", "appears to be a residential av"]
+            
+            # Count indicator matches for each category
+            msp_score = sum(1 for indicator in msp_indicators if indicator in lower_text)
+            commercial_score = sum(1 for indicator in commercial_indicators if indicator in lower_text)
+            residential_score = sum(1 for indicator in residential_indicators if indicator in lower_text)
+            
+            # Calculate total score for reference
+            total_score = msp_score + commercial_score + residential_score
+            
+            # Convert counts to percentage-based scores (1-100)
+            if total_score > 0:
+                # Calculate base scores plus proportion of matches
+                base_score = 20  # Minimum score when an indicator is matched
+                remaining_points = 60  # Points to distribute based on proportion
+                
+                commercial_confidence = base_score if commercial_score > 0 else 10
+                residential_confidence = base_score if residential_score > 0 else 10
+                msp_confidence = base_score if msp_score > 0 else 10
+                
+                if commercial_score > 0:
+                    commercial_confidence += int(remaining_points * (commercial_score / total_score))
+                if residential_score > 0:
+                    residential_confidence += int(remaining_points * (residential_score / total_score))
+                if msp_score > 0:
+                    msp_confidence += int(remaining_points * (msp_score / total_score))
+            else:
+                # No indicators found, assign default scores
+                # Look for keywords related to each category
+                keywords = {
+                    "Managed Service Provider": ["it", "server", "network", "support", "security", "cloud", "managed", "monitoring"],
+                    "Integrator - Commercial A/V": ["business", "conference", "office", "corporation", "enterprise", "presentation"],
+                    "Integrator - Residential A/V": ["home", "residential", "theater", "family", "living", "smart home"]
+                }
+                
+                # Count keywords for each category
+                keyword_counts = {
+                    "Managed Service Provider": sum(1 for word in keywords["Managed Service Provider"] if word in lower_text),
+                    "Integrator - Commercial A/V": sum(1 for word in keywords["Integrator - Commercial A/V"] if word in lower_text),
+                    "Integrator - Residential A/V": sum(1 for word in keywords["Integrator - Residential A/V"] if word in lower_text)
+                }
+                
+                total_keywords = sum(keyword_counts.values())
+                if total_keywords > 0:
+                    # Assign scores based on keyword frequency
+                    base_score = 15
+                    remaining_points = 45
+                    
+                    msp_confidence = base_score + int(remaining_points * (keyword_counts["Managed Service Provider"] / total_keywords))
+                    commercial_confidence = base_score + int(remaining_points * (keyword_counts["Integrator - Commercial A/V"] / total_keywords))
+                    residential_confidence = base_score + int(remaining_points * (keyword_counts["Integrator - Residential A/V"] / total_keywords))
+                else:
+                    # Truly no indicators, assign different but low scores
+                    msp_confidence = 35
+                    commercial_confidence = 33
+                    residential_confidence = 32
         
         # Set the final scores
-        result["confidence_scores"] = base_scores
+        result["confidence_scores"]["Managed Service Provider"] = msp_confidence
+        result["confidence_scores"]["Integrator - Commercial A/V"] = commercial_confidence
+        result["confidence_scores"]["Integrator - Residential A/V"] = residential_confidence
         
         # Set the predicted class
         max_class = max(result["confidence_scores"].items(), key=lambda x: x[1])
@@ -420,15 +456,51 @@ You MUST provide your analysis in JSON format with the following structure:
         
         # Extract explanation - try to get a substantial one
         result["llm_explanation"] = self._extract_explanation(text)
+        result["detection_method"] = "text_classification"
         
         return result
     
-    def _extract_confidence_scores(self, text: str) -> Dict[str, float]:
-        """Extract confidence scores from text response with differentiation."""
+    def _extract_numeric_confidence(self, category_term, text):
+        """Extract numeric confidence scores for a specific category from text."""
+        # Try to find patterns like:
+        # - "70% confidence that it's a [category]"
+        # - "[category] with 70% confidence"
+        # - "confidence score of 70 for [category]"
+        # - "[category]: 70/100"
+        
+        patterns = [
+            # 70% confidence
+            rf"{category_term}.*?(\d+)%",
+            rf"(\d+)%.*?{category_term}",
+            # confidence of 70
+            rf"{category_term}.*?confidence.*?(\d+)",
+            rf"confidence.*?(\d+).*?{category_term}",
+            # score of 70
+            rf"{category_term}.*?score.*?(\d+)",
+            rf"score.*?(\d+).*?{category_term}",
+            # 70/100 format
+            rf"{category_term}.*?(\d+)/100",
+            rf"(\d+)/100.*?{category_term}",
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    score = int(match.group(1))
+                    # Ensure score is within 1-100 range
+                    return max(1, min(100, score))
+                except (ValueError, IndexError):
+                    pass
+        
+        return 0  # No confidence score found
+    
+    def _extract_confidence_scores(self, text: str) -> Dict[str, int]:
+        """Extract confidence scores from text response."""
         scores = {
-            "Integrator - Commercial A/V": 0.0,
-            "Integrator - Residential A/V": 0.0,
-            "Managed Service Provider": 0.0
+            "Integrator - Commercial A/V": 0,
+            "Integrator - Residential A/V": 0,
+            "Managed Service Provider": 0
         }
         
         # Check for insufficient content indicators
@@ -441,81 +513,58 @@ You MUST provide your analysis in JSON format with the following structure:
         if any(indicator in text.lower() for indicator in insufficient_content_indicators):
             # Set very low confidence for all categories
             scores = {
-                "Integrator - Commercial A/V": 0.05,
-                "Integrator - Residential A/V": 0.05,
-                "Managed Service Provider": 0.05
+                "Integrator - Commercial A/V": 5,
+                "Integrator - Residential A/V": 5,
+                "Managed Service Provider": 5
             }
             return scores
         
-        # Look for explicit confidence values
-        # Check for Commercial A/V confidence
-        commercial_match = re.search(r"commercial\s*a\/v.*?(\d+(?:\.\d+)?)%", text.lower())
-        if not commercial_match:
-            commercial_match = re.search(r"commercial\s*a\/v.*?confidence.*?(\d+(?:\.\d+)?)", text.lower())
-        if commercial_match:
-            try:
-                scores["Integrator - Commercial A/V"] = float(commercial_match.group(1)) / 100
-            except:
-                pass
-        
-        # Check for Residential A/V confidence
-        residential_match = re.search(r"residential\s*a\/v.*?(\d+(?:\.\d+)?)%", text.lower())
-        if not residential_match:
-            residential_match = re.search(r"residential\s*a\/v.*?confidence.*?(\d+(?:\.\d+)?)", text.lower())
-        if residential_match:
-            try:
-                scores["Integrator - Residential A/V"] = float(residential_match.group(1)) / 100
-            except:
-                pass
-        
-        # Check for MSP confidence
-        msp_match = re.search(r"managed service provider.*?(\d+(?:\.\d+)?)%", text.lower())
-        if not msp_match:
-            msp_match = re.search(r"msp.*?confidence.*?(\d+(?:\.\d+)?)", text.lower())
-        if msp_match:
-            try:
-                scores["Managed Service Provider"] = float(msp_match.group(1)) / 100
-            except:
-                pass
+        # Try to extract explicit confidence scores
+        lower_text = text.lower()
+        scores["Integrator - Commercial A/V"] = self._extract_numeric_confidence("commercial a/v", lower_text)
+        scores["Integrator - Residential A/V"] = self._extract_numeric_confidence("residential a/v", lower_text)
+        scores["Managed Service Provider"] = self._extract_numeric_confidence("managed service provider", lower_text)
         
         # Check if no scores were extracted or if all scores are the same
         all_scores_same = len(set(scores.values())) <= 1
-        no_scores = all(score == 0.0 for score in scores.values())
+        no_scores = all(score == 0 for score in scores.values())
         
         if no_scores or all_scores_same:
             # Analyze the text content to determine confidence scores
-            lower_text = text.lower()
-            
             # Count keyword mentions to differentiate scores
-            msp_keywords = ["managed service", "msp", "it service", "it support", "network", "server", 
-                          "cybersecurity", "helpdesk", "cloud service", "technical support"]
-            commercial_keywords = ["commercial", "business", "corporate", "conference room", 
-                                 "digital signage", "presentation", "enterprise", "office"]
-            residential_keywords = ["residential", "home theater", "home automation", "smart home", 
-                                  "living space", "whole-home", "luxury", "homeowner"]
+            keywords = {
+                "Managed Service Provider": ["it", "server", "network", "support", "security", "cloud", "managed", "monitoring"],
+                "Integrator - Commercial A/V": ["business", "conference", "office", "corporation", "enterprise", "presentation"],
+                "Integrator - Residential A/V": ["home", "residential", "theater", "family", "living", "smart home"]
+            }
             
-            msp_count = sum(lower_text.count(keyword) for keyword in msp_keywords)
-            commercial_count = sum(lower_text.count(keyword) for keyword in commercial_keywords)
-            residential_count = sum(lower_text.count(keyword) for keyword in residential_keywords)
+            # Count keywords for each category
+            keyword_counts = {
+                "Managed Service Provider": sum(1 for word in keywords["Managed Service Provider"] if word in lower_text),
+                "Integrator - Commercial A/V": sum(1 for word in keywords["Integrator - Commercial A/V"] if word in lower_text),
+                "Integrator - Residential A/V": sum(1 for word in keywords["Integrator - Residential A/V"] if word in lower_text)
+            }
             
-            # Calculate base scores (ensuring they are different)
-            base_total = msp_count + commercial_count + residential_count
-            if base_total > 0:
-                # Start with a base confidence and add weighted counts
-                scores["Managed Service Provider"] = 0.3 + (0.6 * msp_count / base_total)
-                scores["Integrator - Commercial A/V"] = 0.25 + (0.6 * commercial_count / base_total)
-                scores["Integrator - Residential A/V"] = 0.2 + (0.6 * residential_count / base_total)
+            total_keywords = sum(keyword_counts.values())
+            if total_keywords > 0:
+                # Assign scores based on keyword frequency
+                base_score = 15
+                remaining_points = 45
+                
+                scores["Managed Service Provider"] = base_score + int(remaining_points * (keyword_counts["Managed Service Provider"] / total_keywords))
+                scores["Integrator - Commercial A/V"] = base_score + int(remaining_points * (keyword_counts["Integrator - Commercial A/V"] / total_keywords))
+                scores["Integrator - Residential A/V"] = base_score + int(remaining_points * (keyword_counts["Integrator - Residential A/V"] / total_keywords))
             else:
-                # If no keywords found, assign slightly different base scores
-                scores["Managed Service Provider"] = 0.35
-                scores["Integrator - Commercial A/V"] = 0.33
-                scores["Integrator - Residential A/V"] = 0.32
+                # No keywords found, assign different but low scores
+                scores["Managed Service Provider"] = 35
+                scores["Integrator - Commercial A/V"] = 33
+                scores["Integrator - Residential A/V"] = 32
         
         # Final check to ensure scores are different
         if len(set(scores.values())) <= 1:
             # Force differentiation with small adjustments
-            scores["Managed Service Provider"] += 0.03
-            scores["Integrator - Commercial A/V"] += 0.01
+            scores["Managed Service Provider"] += 3
+            scores["Integrator - Commercial A/V"] += 1
         
         return scores
     
@@ -534,38 +583,51 @@ You MUST provide your analysis in JSON format with the following structure:
             if marker in text.lower():
                 parts = text.lower().split(marker)
                 if len(parts) > 1:
-                    explanation = parts[1].strip()
+                    # Get the text after the marker
+                    explanation_text = parts[1].strip()
+                    # Try to find where the explanation ends (before another marker or JSON)
+                    end_markers = ['{', '}', '"predicted_class"']
+                    for end_marker in end_markers:
+                        if end_marker in explanation_text:
+                            explanation_text = explanation_text.split(end_marker)[0]
+                    
+                    explanation = explanation_text
                     break
         
-        # If no marker found, try extracting sentences with reasoning keywords
+        # If no marker found, extract meaningful sentences
         if not explanation or len(explanation) < 50:
-            reasoned_explanation = self._try_extract_better_explanation(text)
-            if reasoned_explanation:
-                explanation = reasoned_explanation
-        
-        # If still no good explanation, use the full text
-        if not explanation or len(explanation) < 50:
-            explanation = text
-        
-        # Clean up the explanation
-        # Remove any JSON-like formatting
-        explanation = re.sub(r'{.*}', '', explanation, flags=re.DOTALL)
-        
-        # Check for meaningfulness
-        if len(explanation.strip()) < 50 or "Classification based on analysis of website content" in explanation:
-            # Find sentences with reasoning language
             sentences = re.split(r'(?<=[.!?])\s+', text)
             meaningful_sentences = []
             
-            reasoning_terms = ["because", "since", "reason", "evidence", "indicates", "suggests", 
-                             "mentions", "refers", "includes", "describes", "shows", "offers"]
+            # Keywords that might indicate reasoning or explanation
+            reasoning_keywords = [
+                "because", "since", "reason", "evidence", "indicates", "suggests",
+                "mentions", "references", "focuses on", "specializes in", "offers",
+                "provides", "features", "highlights", "exhibits", "demonstrates",
+                "I found", "I noticed", "I observed", "appears to be", "based on",
+                "website contains", "content shows", "text mentions"
+            ]
             
+            # Collect sentences that might be part of an explanation
             for sentence in sentences:
-                if any(term in sentence.lower() for term in reasoning_terms):
+                sentence = sentence.strip()
+                if sentence and any(keyword in sentence.lower() for keyword in reasoning_keywords):
                     meaningful_sentences.append(sentence)
             
+            # If we found some reasoning sentences, combine them
             if meaningful_sentences:
                 explanation = " ".join(meaningful_sentences)
+        
+        # If still no good explanation, use the full text
+        if not explanation or len(explanation) < 50:
+            # Remove any JSON-like structures
+            cleaned_text = re.sub(r'{.*}', '', text, flags=re.DOTALL)
+            explanation = cleaned_text
+        
+        # Clean up the explanation
+        # Remove common JSON artifacts that might appear in the text
+        explanation = re.sub(r'"[a-zA-Z_]+":', '', explanation)
+        explanation = re.sub(r'["{}[\]]', '', explanation)
         
         # Limit length but ensure we have a substantial explanation
         if len(explanation) > 1000:
@@ -578,6 +640,6 @@ You MUST provide your analysis in JSON format with the following structure:
                 explanation = "This website appears to have insufficient content to make a reliable classification. The content is minimal, generic, or lacks industry-specific terminology that would allow for confident categorization."
             else:
                 # If explanation is still too short, generate a basic one based on the classification
-                explanation = "Classification based on analysis of website content. Unable to extract specific reasoning from the analysis."
+                explanation = "Classification based on analysis of website content. Unable to extract detailed reasoning from the analysis."
         
         return explanation
