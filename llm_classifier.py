@@ -204,7 +204,7 @@ class LLMClassifier:
             }
             
         try:
-            # Define system prompt with classification task - strengthened JSON instructions
+            # Define system prompt with classification task - strengthened JSON instructions and higher confidence guidance
             system_prompt = f"""You are an expert business analyst who specializes in categorizing technology companies.
 Your task is to analyze the text from a company's website and classify it into ONE of these categories:
 1. Managed Service Provider (MSP)
@@ -233,6 +233,8 @@ Residential A/V Integrators specialize in home theater, smart home technology, r
 IMPORTANT GUIDELINES:
 - Your response MUST be a single, properly formatted JSON object with no preamble, no leading or trailing text, and no extra characters.
 - You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value.
+- When the evidence clearly points to one category, you should assign a HIGH confidence score (0.7-0.9) to that category and LOWER scores to the others.
+- Only use low or moderate confidence scores (0.3-0.6) when the evidence is genuinely ambiguous or minimal.
 - The scores should reflect how confident you are that the company belongs to each category, with higher numbers indicating higher confidence.
 - Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence found in the text.
 - If there isn't enough information in the text, assign low confidence scores (below 0.3) and note this in your explanation.
@@ -309,7 +311,9 @@ IMPORTANT GUIDELINES:
     "Managed Service Provider": 0.XX
   },
   "llm_explanation": "Your detailed explanation here"
-}"""
+}
+
+IMPORTANT: If the evidence strongly points to one category, give it a high confidence score (0.7-0.9)."""
                 
                 # Make retry request to Anthropic API
                 retry_data = {
@@ -563,12 +567,12 @@ IMPORTANT GUIDELINES:
             
         total_score = msp_score + commercial_score + residential_score
         
-        # Calculate dynamic confidence scores (without normalization)
+        # Calculate dynamic confidence scores (without normalization) - with higher starting values
         if total_score > 0:
-            # Base confidence calculations on indicator counts - these should be decimal values (0-1)
-            result["confidence_scores"]["Managed Service Provider"] = min(0.2 + (0.7 * msp_score / max(msp_score + 10, 1)), 0.95) if msp_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.2 + (0.7 * commercial_score / max(commercial_score + 10, 1)), 0.95) if commercial_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.2 + (0.7 * residential_score / max(residential_score + 10, 1)), 0.95) if residential_score > 0 else 0.1
+            # More assertive confidence calculations for text parsing - higher base values and steeper scaling
+            result["confidence_scores"]["Managed Service Provider"] = min(0.3 + (0.6 * msp_score / max(msp_score + 5, 1)), 0.95) if msp_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.3 + (0.6 * commercial_score / max(commercial_score + 5, 1)), 0.95) if commercial_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.3 + (0.6 * residential_score / max(residential_score + 5, 1)), 0.95) if residential_score > 0 else 0.1
             
             # Determine predicted class based on scores
             if msp_score > commercial_score and msp_score > residential_score:
@@ -620,6 +624,19 @@ IMPORTANT GUIDELINES:
         # Set low confidence flag based on highest score
         max_confidence = max(result["confidence_scores"].values())
         result["low_confidence"] = max_confidence < 0.4
+        
+        # Amplify the spread between scores to create more confidence in the winner
+        if not result["low_confidence"]:
+            # Get the winner score
+            winner_score = result["confidence_scores"][result["predicted_class"]]
+            # Amplify it by pushing it higher
+            winner_score = min(winner_score * 1.2, 0.95)
+            # Reduce the other scores
+            for category in result["confidence_scores"]:
+                if category != result["predicted_class"]:
+                    result["confidence_scores"][category] = max(result["confidence_scores"][category] * 0.8, 0.1)
+            # Update the winner score
+            result["confidence_scores"][result["predicted_class"]] = winner_score
             
         return result
 
@@ -647,31 +664,31 @@ IMPORTANT GUIDELINES:
             if msp_count > commercial_count and msp_count > residential_count:
                 predicted_class = "Managed Service Provider"
                 confidence = {
-                    "Managed Service Provider": min(0.05 + (msp_count * 0.03), 0.40),
-                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.02), 0.30),
-                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.02), 0.30)
+                    "Managed Service Provider": min(0.15 + (msp_count * 0.04), 0.75),
+                    "Integrator - Commercial A/V": min(0.10 + (commercial_count * 0.03), 0.40),
+                    "Integrator - Residential A/V": min(0.10 + (residential_count * 0.03), 0.40)
                 }
             elif commercial_count > msp_count and commercial_count > residential_count:
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
-                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.03), 0.40),
-                    "Managed Service Provider": min(0.05 + (msp_count * 0.02), 0.30),
-                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.02), 0.30)
+                    "Integrator - Commercial A/V": min(0.15 + (commercial_count * 0.04), 0.75),
+                    "Managed Service Provider": min(0.10 + (msp_count * 0.03), 0.40),
+                    "Integrator - Residential A/V": min(0.10 + (residential_count * 0.03), 0.40)
                 }
             elif residential_count > msp_count and residential_count > commercial_count:
                 predicted_class = "Integrator - Residential A/V"
                 confidence = {
-                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.03), 0.40),
-                    "Managed Service Provider": min(0.05 + (msp_count * 0.02), 0.30),
-                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.02), 0.30)
+                    "Integrator - Residential A/V": min(0.15 + (residential_count * 0.04), 0.75),
+                    "Managed Service Provider": min(0.10 + (msp_count * 0.03), 0.40),
+                    "Integrator - Commercial A/V": min(0.10 + (commercial_count * 0.03), 0.40)
                 }
             else:
                 # In case of a tie, default to commercial AV
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
-                    "Integrator - Commercial A/V": 0.20,
-                    "Managed Service Provider": 0.15,
-                    "Integrator - Residential A/V": 0.10
+                    "Integrator - Commercial A/V": 0.35,
+                    "Managed Service Provider": 0.25,
+                    "Integrator - Residential A/V": 0.20
                 }
         else:
             # If no indicators found, provide a very low confidence default
