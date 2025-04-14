@@ -223,6 +223,29 @@ def save_to_snowflake(domain, url, content, classification):
         logger.error(f"Error saving to Snowflake: {e}\n{traceback.format_exc()}")
         return False
 
+def format_confidence_scores(scores):
+    """
+    Ensure all confidence scores are integers between 1-100
+    """
+    if not scores:
+        return {}
+        
+    formatted_scores = {}
+    for category, score in scores.items():
+        # Convert to integer if it's a float between 0-1
+        if isinstance(score, float) and 0 <= score <= 1:
+            score = int(score * 100)
+        
+        # Ensure it's an integer between 1-100
+        try:
+            score_int = int(score)
+            formatted_scores[category] = max(1, min(100, score_int))
+        except (ValueError, TypeError):
+            # Default to 5% if invalid
+            formatted_scores[category] = 5
+            
+    return formatted_scores
+
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     """Direct API that classifies a domain or email and returns the result"""
@@ -286,6 +309,8 @@ def classify_domain():
                     confidence_scores = {}
                     try:
                         confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+                        # Format confidence scores to ensure they're integers 1-100
+                        confidence_scores = format_confidence_scores(confidence_scores)
                     except Exception as e:
                         logger.warning(f"Could not parse all_scores for {domain}: {e}")
                     
@@ -300,14 +325,21 @@ def classify_domain():
                     # Add low_confidence flag based on confidence score
                     low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
                     
+                    # Format the confidence score as integer 1-100
+                    confidence_value = existing_record.get('confidence_score', 0.5)
+                    if isinstance(confidence_value, float) and 0 <= confidence_value <= 1:
+                        confidence_value = int(confidence_value * 100)
+                    confidence_value = max(1, min(100, int(confidence_value)))
+                    
                     # Return the cached classification
                     result = {
                         "domain": domain,
-                        "company_type": existing_record.get('company_type'),
-                        "confidence": existing_record.get('confidence_score'),
+                        "predicted_class": existing_record.get('company_type'),
+                        "confidence_score": confidence_value,
                         "confidence_scores": confidence_scores,
                         "explanation": llm_explanation,
                         "low_confidence": low_confidence,
+                        "detection_method": existing_record.get('detection_method', 'api'),
                         "source": "cached"
                     }
                     
@@ -339,7 +371,13 @@ def classify_domain():
                 error_result = {
                     "domain": domain,
                     "error": "Failed to crawl website or website has insufficient content",
-                    "company_type": "Unknown",
+                    "predicted_class": "Unknown",
+                    "confidence_score": 5,  # Very low confidence as integer
+                    "confidence_scores": {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 5,
+                        "Integrator - Residential A/V": 5
+                    },
                     "low_confidence": True
                 }
                 
@@ -354,7 +392,13 @@ def classify_domain():
             error_result = {
                 "domain": domain, 
                 "error": "LLM classifier is not available",
-                "company_type": "Unknown",
+                "predicted_class": "Unknown",
+                "confidence_score": 5,  # Very low confidence as integer
+                "confidence_scores": {
+                    "Managed Service Provider": 5,
+                    "Integrator - Commercial A/V": 5,
+                    "Integrator - Residential A/V": 5
+                },
                 "low_confidence": True
             }
             
@@ -371,7 +415,13 @@ def classify_domain():
             error_result = {
                 "domain": domain,
                 "error": "Classification failed",
-                "company_type": "Unknown",
+                "predicted_class": "Unknown",
+                "confidence_score": 5,  # Very low confidence as integer
+                "confidence_scores": {
+                    "Managed Service Provider": 5,
+                    "Integrator - Commercial A/V": 5,
+                    "Integrator - Residential A/V": 5
+                },
                 "low_confidence": True
             }
             
@@ -387,10 +437,19 @@ def classify_domain():
             if confidence_scores:
                 max_class = max(confidence_scores.items(), key=lambda x: x[1])
                 classification["predicted_class"] = max_class[0]
-                classification["max_confidence"] = max_class[1]
+                
+                # Format the max confidence as integer 1-100
+                max_confidence_value = max_class[1]
+                if isinstance(max_confidence_value, float) and 0 <= max_confidence_value <= 1:
+                    max_confidence_value = int(max_confidence_value * 100)
+                classification["max_confidence"] = max(1, min(100, int(max_confidence_value)))
+        
+        # Format all confidence scores to ensure they're integers 1-100
+        if "confidence_scores" in classification:
+            classification["confidence_scores"] = format_confidence_scores(classification["confidence_scores"])
         
         # Set low_confidence flag based on threshold
-        classification["low_confidence"] = classification.get("max_confidence", 0) < LOW_CONFIDENCE_THRESHOLD
+        classification["low_confidence"] = classification.get("max_confidence", 0) < LOW_CONFIDENCE_THRESHOLD * 100
         
         # Save to Snowflake (always save, even for reclassifications)
         save_to_snowflake(domain, url, content, classification)
@@ -398,11 +457,16 @@ def classify_domain():
         # Create the response
         result = {
             "domain": domain,
-            "company_type": classification.get('predicted_class'),
-            "confidence": classification.get('max_confidence', 0.0),
-            "confidence_scores": classification.get('confidence_scores', {}),
+            "predicted_class": classification.get('predicted_class'),
+            "confidence_score": classification.get('max_confidence', 5),  # Ensure this is integer 1-100
+            "confidence_scores": classification.get('confidence_scores', {
+                "Managed Service Provider": 5,
+                "Integrator - Commercial A/V": 5,
+                "Integrator - Residential A/V": 5
+            }),
             "explanation": classification.get('llm_explanation', ''),
             "low_confidence": classification.get('low_confidence', False),
+            "detection_method": classification.get('detection_method', 'api'),
             "source": "fresh"
         }
         
@@ -416,7 +480,13 @@ def classify_domain():
         logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
         return jsonify({
             "error": str(e),
-            "company_type": "Error",
+            "predicted_class": "Error",
+            "confidence_score": 5,
+            "confidence_scores": {
+                "Managed Service Provider": 5,
+                "Integrator - Commercial A/V": 5,
+                "Integrator - Residential A/V": 5
+            },
             "low_confidence": True
         }), 500
 
@@ -472,7 +542,13 @@ def classify_email():
         logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
         return jsonify({
             "error": str(e),
-            "company_type": "Error",
+            "predicted_class": "Error",
+            "confidence_score": 5,
+            "confidence_scores": {
+                "Managed Service Provider": 5,
+                "Integrator - Commercial A/V": 5,
+                "Integrator - Residential A/V": 5
+            },
             "low_confidence": True
         }), 500
 
