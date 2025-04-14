@@ -131,12 +131,52 @@ class LLMClassifier:
         # Check if domain appears to be parked or has minimal content
         if self.detect_parked_domain(text_content):
             logger.warning(f"Domain {domain or 'unknown'} appears to be parked or has minimal content")
+            
+            # Look for any weak signals even in minimal content
+            text_lower = text_content.lower()
+            msp_indicators = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
+            commercial_indicators = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
+            residential_indicators = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
+            
+            # Base scores - low but still slightly differentiated
+            msp_score = 0.05  # Using decimal scores (0-1 range)
+            commercial_score = 0.04
+            residential_score = 0.03
+            
+            # Adjust based on found indicators (small adjustments)
+            if msp_indicators > 0: msp_score += msp_indicators * 0.01
+            if commercial_indicators > 0: commercial_score += commercial_indicators * 0.01
+            if residential_indicators > 0: residential_score += residential_indicators * 0.01
+            
+            # Ensure at least one score is different if all ended up the same
+            if abs(msp_score - commercial_score) < 0.01 and abs(msp_score - residential_score) < 0.01:
+                # If all equal, pick one based on domain characteristics
+                if domain:
+                    if any(term in domain.lower() for term in ['it', 'tech', 'cloud', 'net']):
+                        msp_score += 0.02
+                    elif any(term in domain.lower() for term in ['av', 'audio', 'video']):
+                        commercial_score += 0.02
+                    elif any(term in domain.lower() for term in ['home', 'living']):
+                        residential_score += 0.02
+                    else:
+                        # Default priority: MSP > Commercial > Residential
+                        msp_score += 0.02
+            
+            # Determine predicted class
+            if msp_score >= commercial_score and msp_score >= residential_score:
+                predicted_class = "Managed Service Provider"
+            elif commercial_score >= msp_score and commercial_score >= residential_score:
+                predicted_class = "Integrator - Commercial A/V"
+            else:
+                predicted_class = "Integrator - Residential A/V"
+            
+            # These are not integers, they are decimal confidence scores (0.03-0.10 range)
             return {
-                "predicted_class": "Integrator - Commercial A/V",  # Default to avoid breaking changes
+                "predicted_class": predicted_class,
                 "confidence_scores": {
-                    "Managed Service Provider": 5,
-                    "Integrator - Commercial A/V": 5,
-                    "Integrator - Residential A/V": 5
+                    "Managed Service Provider": msp_score,
+                    "Integrator - Commercial A/V": commercial_score,
+                    "Integrator - Residential A/V": residential_score
                 },
                 "llm_explanation": "This domain appears to be parked or has minimal content. Unable to determine the company type with confidence. The classification is inconclusive due to insufficient information.",
                 "detection_method": "minimal_content_detection",
@@ -163,9 +203,9 @@ You MUST provide your analysis in JSON format with the following structure:
 {{
   "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
   "confidence_scores": {{
-    "Integrator - Commercial A/V": Integer from 1-100,
-    "Integrator - Residential A/V": Integer from 1-100,
-    "Managed Service Provider": Integer from 1-100
+    "Integrator - Commercial A/V": [decimal value between 0 and 1],
+    "Integrator - Residential A/V": [decimal value between 0 and 1],
+    "Managed Service Provider": [decimal value between 0 and 1]
   }},
   "llm_explanation": "A detailed explanation of why this classification was chosen, citing specific evidence from the text"
 }}
@@ -174,7 +214,7 @@ IMPORTANT GUIDELINES:
 - You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value.
 - The scores should reflect how confident you are that the company belongs to each category, with higher numbers indicating higher confidence.
 - Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence found in the text.
-- If there isn't enough information in the text, assign low confidence scores (below 30) and note this in your explanation.
+- If there isn't enough information in the text, assign low confidence scores (below 0.3) and note this in your explanation.
 - Ensure your JSON is properly formatted with no trailing commas.
 """
 
@@ -221,41 +261,41 @@ IMPORTANT GUIDELINES:
                     
                     # Validate and process confidence scores
                     if "confidence_scores" in parsed_json:
-                        # Convert confidence scores to integers between 1-100
+                        # Ensure scores are in 0-1 range (decimal format)
                         for category in parsed_json["confidence_scores"]:
                             score_value = parsed_json["confidence_scores"][category]
                             
                             # Handle potential strings that look like numbers
-                            if isinstance(score_value, str) and score_value.isdigit():
-                                score_value = int(score_value)
+                            if isinstance(score_value, str) and score_value.replace('.', '', 1).isdigit():
+                                score_value = float(score_value)
                             
-                            # Ensure score is an integer between 1-100
+                            # Ensure score is a decimal between 0 and 1
                             if isinstance(score_value, (int, float)):
-                                # If score is between 0-1, convert to 1-100 scale
-                                if 0 <= score_value <= 1:
-                                    score_value = int(score_value * 100)
+                                # If score is greater than 1, convert to 0-1 scale
+                                if score_value > 1:
+                                    score_value = score_value / 100 if score_value <= 100 else 0.9
                                 
                                 # Ensure it's within bounds
-                                score_value = max(1, min(100, int(score_value)))
+                                score_value = max(0.01, min(0.99, float(score_value)))
                                 parsed_json["confidence_scores"][category] = score_value
                             else:
                                 # Default if not a valid number
-                                parsed_json["confidence_scores"][category] = 10
+                                parsed_json["confidence_scores"][category] = 0.1
                     
                     # Check if all scores are identical and fix if needed
                     scores = list(parsed_json["confidence_scores"].values())
-                    if len(set(scores)) == 1:
+                    if len(set([round(s, 2) for s in scores])) == 1:
                         logger.warning("All confidence scores are the same, regenerating differentiated scores")
                         # Find predicted class and make it have the highest score
                         predicted_class = parsed_json["predicted_class"]
-                        base_score = max(scores[0] - 20, 5)  # Reduce by 20 but keep above 5
+                        base_score = max(scores[0] - 0.2, 0.05)  # Reduce by 0.2 but keep above 0.05
                         
                         # Set different scores for each class
                         for category in parsed_json["confidence_scores"]:
                             if category == predicted_class:
-                                parsed_json["confidence_scores"][category] = min(base_score + 30, 100)
+                                parsed_json["confidence_scores"][category] = min(base_score + 0.3, 0.95)
                             elif category == list(parsed_json["confidence_scores"].keys())[0]:
-                                parsed_json["confidence_scores"][category] = min(base_score + 15, 95)
+                                parsed_json["confidence_scores"][category] = min(base_score + 0.15, 0.90)
                             else:
                                 parsed_json["confidence_scores"][category] = base_score
                     
@@ -281,20 +321,7 @@ IMPORTANT GUIDELINES:
                     
                     # Add low_confidence flag based on highest confidence score
                     max_confidence = max(parsed_json["confidence_scores"].values())
-                    parsed_json["low_confidence"] = max_confidence < 40
-                    
-                    # Check and fix if any confidence scores are outside 1-100 range
-                    for category in parsed_json["confidence_scores"]:
-                        score = parsed_json["confidence_scores"][category]
-                        if not isinstance(score, int) or score < 1 or score > 100:
-                            # If score is between 0-1, convert to 1-100 scale
-                            if isinstance(score, (int, float)) and 0 <= score <= 1:
-                                score = int(score * 100)
-                            else:
-                                # Default for invalid scores
-                                score = 10 if category != parsed_json["predicted_class"] else 30
-                            
-                            parsed_json["confidence_scores"][category] = score
+                    parsed_json["low_confidence"] = max_confidence < 0.4
                     
                     return parsed_json
                     
@@ -358,7 +385,7 @@ IMPORTANT GUIDELINES:
         # Ultimate fallback
         return "Classification based on analysis of website content. Insufficient information available for detailed explanation."
 
-    def _extract_numeric_confidence(self, text, default=20) -> int:
+    def _extract_numeric_confidence(self, text, default=0.2) -> float:
         """
         Extract a numeric confidence value from text.
         
@@ -367,31 +394,33 @@ IMPORTANT GUIDELINES:
             default: Default value if no confidence found
             
         Returns:
-            int: The confidence value (1-100)
+            float: The confidence value (0-1)
         """
         # Try to extract a percentage
         percentage_match = re.search(r'(\d+)%', text)
         if percentage_match:
             value = int(percentage_match.group(1))
-            return max(1, min(100, value))
+            return max(0.01, min(0.99, value / 100.0))
             
         # Try to extract a confidence score mentioned explicitly
         confidence_patterns = [
-            r'confidence(?:\s+score)?(?:\s+of)?(?:\s+is)?(?:\s*:)?\s*(\d+)',
-            r'score(?:\s+of)?(?:\s*:)?\s*(\d+)'
+            r'confidence(?:\s+score)?(?:\s+of)?(?:\s+is)?(?:\s*:)?\s*(\d+(?:\.\d+)?)',
+            r'score(?:\s+of)?(?:\s*:)?\s*(\d+(?:\.\d+)?)'
         ]
         
         for pattern in confidence_patterns:
             confidence_match = re.search(pattern, text, re.IGNORECASE)
             if confidence_match:
-                value = int(confidence_match.group(1))
-                return max(1, min(100, value))
+                value = float(confidence_match.group(1))
+                if value > 1:  # If it's like 80 instead of 0.8
+                    value = value / 100.0 if value <= 100 else 0.9
+                return max(0.01, min(0.99, value))
                 
         # Try to find a decimal between 0-1
         decimal_match = re.search(r'confidence(?:\s+score)?(?:\s+of)?(?:\s+is)?(?:\s*:)?\s*(0\.\d+)', text, re.IGNORECASE)
         if decimal_match:
             value = float(decimal_match.group(1))
-            return max(1, min(100, int(value * 100)))
+            return max(0.01, min(0.99, value))
             
         # Return the default
         return default
@@ -409,9 +438,9 @@ IMPORTANT GUIDELINES:
         result = {
             "predicted_class": None,
             "confidence_scores": {
-                "Managed Service Provider": 0,
-                "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Managed Service Provider": 0.0,
+                "Integrator - Commercial A/V": 0.0,
+                "Integrator - Residential A/V": 0.0
             },
             "llm_explanation": self._extract_explanation(text_content),
             "detection_method": "text_parsing",
@@ -427,9 +456,9 @@ IMPORTANT GUIDELINES:
         if insufficient_info:
             # Default to commercial AV with very low confidence
             result["predicted_class"] = "Integrator - Commercial A/V"
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 15
-            result["confidence_scores"]["Integrator - Residential A/V"] = 10
-            result["confidence_scores"]["Managed Service Provider"] = 5
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.15
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.10
+            result["confidence_scores"]["Managed Service Provider"] = 0.05
             return result
         
         # Count indicators for each category
@@ -451,10 +480,10 @@ IMPORTANT GUIDELINES:
         
         # Calculate dynamic confidence scores (without normalization)
         if total_score > 0:
-            # Base confidence calculations on indicator counts
-            result["confidence_scores"]["Managed Service Provider"] = min(5 + (msp_score * 5), 95) if msp_score > 0 else 5
-            result["confidence_scores"]["Integrator - Commercial A/V"] = min(5 + (commercial_score * 5), 95) if commercial_score > 0 else 5
-            result["confidence_scores"]["Integrator - Residential A/V"] = min(5 + (residential_score * 5), 95) if residential_score > 0 else 5
+            # Base confidence calculations on indicator counts - these should be decimal values (0-1)
+            result["confidence_scores"]["Managed Service Provider"] = min(0.2 + (0.7 * msp_score / max(msp_score + 10, 1)), 0.95) if msp_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.2 + (0.7 * commercial_score / max(commercial_score + 10, 1)), 0.95) if commercial_score > 0 else 0.1
+            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.2 + (0.7 * residential_score / max(residential_score + 10, 1)), 0.95) if residential_score > 0 else 0.1
             
             # Determine predicted class based on scores
             if msp_score > commercial_score and msp_score > residential_score:
@@ -491,9 +520,9 @@ IMPORTANT GUIDELINES:
         else:
             # If no indicators found, default to commercial AV with low confidence
             result["predicted_class"] = "Integrator - Commercial A/V"
-            result["confidence_scores"]["Integrator - Commercial A/V"] = 20
-            result["confidence_scores"]["Integrator - Residential A/V"] = 15
-            result["confidence_scores"]["Managed Service Provider"] = 10
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 0.20
+            result["confidence_scores"]["Integrator - Residential A/V"] = 0.15
+            result["confidence_scores"]["Managed Service Provider"] = 0.10
         
         # Ensure the predicted class always has the highest confidence score
         highest_category = max(result["confidence_scores"], key=result["confidence_scores"].get)
@@ -505,7 +534,7 @@ IMPORTANT GUIDELINES:
             
         # Set low confidence flag based on highest score
         max_confidence = max(result["confidence_scores"].values())
-        result["low_confidence"] = max_confidence < 40
+        result["low_confidence"] = max_confidence < 0.4
             
         return result
 
@@ -533,39 +562,39 @@ IMPORTANT GUIDELINES:
             if msp_count > commercial_count and msp_count > residential_count:
                 predicted_class = "Managed Service Provider"
                 confidence = {
-                    "Managed Service Provider": min(5 + (msp_count * 3), 40),
-                    "Integrator - Commercial A/V": min(5 + (commercial_count * 2), 30),
-                    "Integrator - Residential A/V": min(5 + (residential_count * 2), 30)
+                    "Managed Service Provider": min(0.05 + (msp_count * 0.03), 0.40),
+                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.02), 0.30),
+                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.02), 0.30)
                 }
             elif commercial_count > msp_count and commercial_count > residential_count:
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
-                    "Integrator - Commercial A/V": min(5 + (commercial_count * 3), 40),
-                    "Managed Service Provider": min(5 + (msp_count * 2), 30),
-                    "Integrator - Residential A/V": min(5 + (residential_count * 2), 30)
+                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.03), 0.40),
+                    "Managed Service Provider": min(0.05 + (msp_count * 0.02), 0.30),
+                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.02), 0.30)
                 }
             elif residential_count > msp_count and residential_count > commercial_count:
                 predicted_class = "Integrator - Residential A/V"
                 confidence = {
-                    "Integrator - Residential A/V": min(5 + (residential_count * 3), 40),
-                    "Managed Service Provider": min(5 + (msp_count * 2), 30),
-                    "Integrator - Commercial A/V": min(5 + (commercial_count * 2), 30)
+                    "Integrator - Residential A/V": min(0.05 + (residential_count * 0.03), 0.40),
+                    "Managed Service Provider": min(0.05 + (msp_count * 0.02), 0.30),
+                    "Integrator - Commercial A/V": min(0.05 + (commercial_count * 0.02), 0.30)
                 }
             else:
                 # In case of a tie, default to commercial AV
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
-                    "Integrator - Commercial A/V": 30,
-                    "Managed Service Provider": 25,
-                    "Integrator - Residential A/V": 20
+                    "Integrator - Commercial A/V": 0.20,
+                    "Managed Service Provider": 0.15,
+                    "Integrator - Residential A/V": 0.10
                 }
         else:
             # If no indicators found, provide a very low confidence default
             predicted_class = "Integrator - Commercial A/V"
             confidence = {
-                "Integrator - Commercial A/V": 20,
-                "Managed Service Provider": 15,
-                "Integrator - Residential A/V": 10
+                "Integrator - Commercial A/V": 0.12,
+                "Managed Service Provider": 0.10,
+                "Integrator - Residential A/V": 0.08
             }
             
         return {
