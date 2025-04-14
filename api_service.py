@@ -199,12 +199,26 @@ def save_to_snowflake(domain, url, content, classification):
         if 'low_confidence' not in classification:
             classification['low_confidence'] = classification['max_confidence'] < LOW_CONFIDENCE_THRESHOLD
 
-        # Create model metadata with TRUNCATED explanation to avoid Snowflake error
+        # Process explanation to ensure it's not truncated mid-sentence
         llm_explanation = classification.get('llm_explanation', '')
+        
+        # If explanation is too long, trim it properly at a sentence boundary
+        if len(llm_explanation) > 500:
+            # Find the last period before 450 chars
+            last_period_index = llm_explanation[:450].rfind('.')
+            if last_period_index > 0:
+                shortened_explanation = llm_explanation[:last_period_index + 1]
+            else:
+                # If no period found, just truncate with an ellipsis
+                shortened_explanation = llm_explanation[:450] + "..."
+        else:
+            shortened_explanation = llm_explanation
+            
+        # Create model metadata with properly formatted explanation
         model_metadata = {
             'model_version': '1.0',
             'llm_model': 'claude-3-haiku-20240307',
-            'llm_explanation': llm_explanation[:500] if llm_explanation else ''  # Truncate to 500 chars
+            'llm_explanation': shortened_explanation
         }
         
         logger.info(f"Saving classification to Snowflake: {domain}, {classification['predicted_class']}")
@@ -309,7 +323,7 @@ def classify_domain():
                             category: int(score * 100) 
                             for category, score in confidence_scores.items()
                         },
-                        "explanation": llm_explanation,
+                        "explanation": llm_explanation if llm_explanation else 'No explanation available.',
                         "low_confidence": low_confidence,
                         "detection_method": existing_record.get('detection_method', 'api'),
                         "source": "cached"
@@ -426,7 +440,7 @@ def classify_domain():
                 category: int(score * 100) 
                 for category, score in classification.get('confidence_scores', {}).items()
             },
-            "explanation": classification.get('llm_explanation', ''),
+            "explanation": classification.get('llm_explanation', 'No explanation available.'),
             "low_confidence": classification.get('low_confidence', False),
             "detection_method": classification.get('detection_method', 'api'),
             "source": "fresh"
