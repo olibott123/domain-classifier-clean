@@ -67,6 +67,26 @@ class LLMClassifier:
         cleaned = re.sub(r'([^\\])"([^{}\[\],:"\\])', r'\1\"\2', cleaned)
         return cleaned
 
+    def repair_json(self, json_str: str) -> str:
+        """Attempt to repair common JSON syntax errors."""
+        # Replace single quotes with double quotes (common Claude error)
+        fixed = re.sub(r"'([^']*)':", r'"\1":', json_str)
+        
+        # Fix trailing commas in objects and arrays
+        fixed = re.sub(r',\s*}', '}', fixed)
+        fixed = re.sub(r',\s*]', ']', fixed)
+        
+        # Fix missing quotes around property names
+        fixed = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', fixed)
+        
+        # Replace unescaped newlines in strings
+        fixed = re.sub(r'(".*?)\n(.*?")', r'\1\\n\2', fixed, flags=re.DOTALL)
+        
+        # Handle decimal values without leading zero
+        fixed = re.sub(r':\s*\.(\d+)', r': 0.\1', fixed)
+        
+        return fixed
+
     def detect_parked_domain(self, content: str) -> bool:
         """
         Detect if a domain appears to be parked or has minimal content.
@@ -184,7 +204,7 @@ class LLMClassifier:
             }
             
         try:
-            # Define system prompt with classification task
+            # Define system prompt with classification task - strengthened JSON instructions
             system_prompt = f"""You are an expert business analyst who specializes in categorizing technology companies.
 Your task is to analyze the text from a company's website and classify it into ONE of these categories:
 1. Managed Service Provider (MSP)
@@ -199,7 +219,7 @@ Commercial A/V Integrators focus on audiovisual technology for businesses, such 
 
 Residential A/V Integrators specialize in home theater, smart home technology, residential automation, and audio/video systems for homes.
 
-You MUST provide your analysis in JSON format with the following structure:
+**YOU MUST ANSWER IN VALID JSON FORMAT EXACTLY AS SHOWN BELOW, WITH NO OTHER TEXT BEFORE OR AFTER THE JSON**:
 {{
   "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
   "confidence_scores": {{
@@ -211,6 +231,7 @@ You MUST provide your analysis in JSON format with the following structure:
 }}
 
 IMPORTANT GUIDELINES:
+- Your response MUST be a single, properly formatted JSON object with no preamble, no leading or trailing text, and no extra characters.
 - You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value.
 - The scores should reflect how confident you are that the company belongs to each category, with higher numbers indicating higher confidence.
 - Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence found in the text.
@@ -250,85 +271,149 @@ IMPORTANT GUIDELINES:
             # Extract the text response from the API
             text_response = response_data["content"][0]["text"]
             
-            # Try to find JSON-like structure in the response
-            json_match = re.search(r'({.*"predicted_class".*})', text_response, re.DOTALL)
+            # Try multiple patterns to extract JSON
+            json_patterns = [
+                r'({[\s\S]*"predicted_class"[\s\S]*})',  # Most general pattern
+                r'```(?:json)?\s*({[\s\S]*})\s*```',     # For markdown code blocks
+                r'({[\s\S]*"confidence_scores"[\s\S]*})' # Alternative key
+            ]
             
-            if json_match:
+            parsed_json = None
+            
+            # Try each pattern
+            for pattern in json_patterns:
+                json_match = re.search(pattern, text_response, re.DOTALL)
+                if json_match:
+                    # Clean and process the JSON
+                    try:
+                        cleaned_json = self.clean_json_string(json_match.group(1))
+                        repaired_json = self.repair_json(cleaned_json)
+                        parsed_json = json.loads(repaired_json)
+                        logger.info(f"Successfully parsed JSON with pattern: {pattern}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Error parsing extracted JSON with pattern '{pattern}': {e}")
+                        continue
+            
+            # If JSON parsing fails, try again with a more explicit instruction
+            if parsed_json is None:
+                logger.warning("All JSON parsing attempts failed, retrying with a more explicit prompt")
+                
+                # Send a follow-up request to Claude
+                retry_prompt = """Your previous response was not valid JSON. Please provide your analysis in proper JSON format with EXACTLY this structure and no other text:
+{
+  "predicted_class": "One of: Managed Service Provider, Integrator - Commercial A/V, or Integrator - Residential A/V",
+  "confidence_scores": {
+    "Integrator - Commercial A/V": 0.XX,
+    "Integrator - Residential A/V": 0.XX,
+    "Managed Service Provider": 0.XX
+  },
+  "llm_explanation": "Your detailed explanation here"
+}"""
+                
+                # Make retry request to Anthropic API
+                retry_data = {
+                    "model": self.model,
+                    "system": "You must provide a valid JSON response with no extra text.",
+                    "messages": [
+                        {"role": "user", "content": f"Here's the text from a company's website: {text_content[:500]}..."},
+                        {"role": "assistant", "content": text_response[:100] + "..."},
+                        {"role": "user", "content": retry_prompt}
+                    ],
+                    "max_tokens": 1500,
+                    "temperature": 0.1
+                }
+                
                 try:
-                    # Clean the JSON string to handle potential issues
-                    cleaned_json = self.clean_json_string(json_match.group(1))
-                    parsed_json = json.loads(cleaned_json)
+                    retry_response = requests.post(url, headers=headers, json=retry_data, timeout=30)
+                    retry_response_data = retry_response.json()
+                    retry_text = retry_response_data["content"][0]["text"]
                     
-                    # Validate and process confidence scores
-                    if "confidence_scores" in parsed_json:
-                        # Ensure scores are in 0-1 range (decimal format)
-                        for category in parsed_json["confidence_scores"]:
-                            score_value = parsed_json["confidence_scores"][category]
-                            
-                            # Handle potential strings that look like numbers
-                            if isinstance(score_value, str) and score_value.replace('.', '', 1).isdigit():
-                                score_value = float(score_value)
-                            
-                            # Ensure score is a decimal between 0 and 1
-                            if isinstance(score_value, (int, float)):
-                                # If score is greater than 1, convert to 0-1 scale
-                                if score_value > 1:
-                                    score_value = score_value / 100 if score_value <= 100 else 0.9
-                                
-                                # Ensure it's within bounds
-                                score_value = max(0.01, min(0.99, float(score_value)))
-                                parsed_json["confidence_scores"][category] = score_value
-                            else:
-                                # Default if not a valid number
-                                parsed_json["confidence_scores"][category] = 0.1
-                    
-                    # Check if all scores are identical and fix if needed
-                    scores = list(parsed_json["confidence_scores"].values())
-                    if len(set([round(s, 2) for s in scores])) == 1:
-                        logger.warning("All confidence scores are the same, regenerating differentiated scores")
-                        # Find predicted class and make it have the highest score
-                        predicted_class = parsed_json["predicted_class"]
-                        base_score = max(scores[0] - 0.2, 0.05)  # Reduce by 0.2 but keep above 0.05
-                        
-                        # Set different scores for each class
-                        for category in parsed_json["confidence_scores"]:
-                            if category == predicted_class:
-                                parsed_json["confidence_scores"][category] = min(base_score + 0.3, 0.95)
-                            elif category == list(parsed_json["confidence_scores"].keys())[0]:
-                                parsed_json["confidence_scores"][category] = min(base_score + 0.15, 0.90)
-                            else:
-                                parsed_json["confidence_scores"][category] = base_score
-                    
-                    # Ensure explanation is substantial
-                    if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
-                        parsed_json["llm_explanation"] = self._extract_explanation(text_response)
-                    
-                    # If explanation is generic, try to extract a better one
-                    generic_explanations = [
-                        "Classification based on analysis of website content",
-                        "Based on the available information",
-                        "Based on the content provided"
-                    ]
-                    
-                    explanation = parsed_json["llm_explanation"]
-                    if any(generic in explanation for generic in generic_explanations) or len(explanation) < 50:
-                        better_explanation = self._extract_explanation(text_response)
-                        if len(better_explanation) > len(explanation):
-                            parsed_json["llm_explanation"] = better_explanation
-                    
-                    parsed_json["detection_method"] = "llm"
-                    logger.info(f"Classified as {parsed_json['predicted_class']} with LLM")
-                    
-                    # Add low_confidence flag based on highest confidence score
-                    max_confidence = max(parsed_json["confidence_scores"].values())
-                    parsed_json["low_confidence"] = max_confidence < 0.4
-                    
-                    return parsed_json
-                    
+                    # Try to extract JSON from retry response
+                    for pattern in json_patterns:
+                        json_match = re.search(pattern, retry_text, re.DOTALL)
+                        if json_match:
+                            try:
+                                cleaned_json = self.clean_json_string(json_match.group(1))
+                                repaired_json = self.repair_json(cleaned_json)
+                                parsed_json = json.loads(repaired_json)
+                                # Successfully parsed JSON from retry
+                                logger.info("Successfully parsed JSON from retry request")
+                                break
+                            except Exception as e:
+                                logger.warning(f"Error parsing JSON from retry: {e}")
+                                continue
                 except Exception as e:
-                    logger.error(f"Error parsing LLM response: {e}")
-                    # Fall back to text parsing
+                    logger.error(f"Error with retry request: {e}")
             
+            # If we successfully parsed JSON, process it
+            if parsed_json is not None:
+                # Validate and process confidence scores
+                if "confidence_scores" in parsed_json:
+                    # Ensure scores are in 0-1 range (decimal format)
+                    for category in parsed_json["confidence_scores"]:
+                        score_value = parsed_json["confidence_scores"][category]
+                        
+                        # Handle potential strings that look like numbers
+                        if isinstance(score_value, str) and score_value.replace('.', '', 1).isdigit():
+                            score_value = float(score_value)
+                        
+                        # Ensure score is a decimal between 0 and 1
+                        if isinstance(score_value, (int, float)):
+                            # If score is greater than 1, convert to 0-1 scale
+                            if score_value > 1:
+                                score_value = score_value / 100 if score_value <= 100 else 0.9
+                            
+                            # Ensure it's within bounds
+                            score_value = max(0.01, min(0.99, float(score_value)))
+                            parsed_json["confidence_scores"][category] = score_value
+                        else:
+                            # Default if not a valid number
+                            parsed_json["confidence_scores"][category] = 0.1
+                
+                # Check if all scores are identical and fix if needed
+                scores = list(parsed_json["confidence_scores"].values())
+                if len(set([round(s, 2) for s in scores])) == 1:
+                    logger.warning("All confidence scores are the same, regenerating differentiated scores")
+                    # Find predicted class and make it have the highest score
+                    predicted_class = parsed_json["predicted_class"]
+                    base_score = max(scores[0] - 0.2, 0.05)  # Reduce by 0.2 but keep above 0.05
+                    
+                    # Set different scores for each class
+                    for category in parsed_json["confidence_scores"]:
+                        if category == predicted_class:
+                            parsed_json["confidence_scores"][category] = min(base_score + 0.3, 0.95)
+                        elif category == list(parsed_json["confidence_scores"].keys())[0]:
+                            parsed_json["confidence_scores"][category] = min(base_score + 0.15, 0.90)
+                        else:
+                            parsed_json["confidence_scores"][category] = base_score
+                
+                # Ensure explanation is substantial
+                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
+                    parsed_json["llm_explanation"] = self._extract_explanation(text_response)
+                
+                # If explanation is generic, try to extract a better one
+                generic_explanations = [
+                    "Classification based on analysis of website content",
+                    "Based on the available information",
+                    "Based on the content provided"
+                ]
+                
+                explanation = parsed_json["llm_explanation"]
+                if any(generic in explanation for generic in generic_explanations) or len(explanation) < 50:
+                    better_explanation = self._extract_explanation(text_response)
+                    if len(better_explanation) > len(explanation):
+                        parsed_json["llm_explanation"] = better_explanation
+                
+                parsed_json["detection_method"] = "llm"
+                logger.info(f"Classified as {parsed_json['predicted_class']} with LLM")
+                
+                # Add low_confidence flag based on highest confidence score
+                max_confidence = max(parsed_json["confidence_scores"].values())
+                parsed_json["low_confidence"] = max_confidence < 0.4
+                
+                return parsed_json
+                
             # If we get here, either no JSON was found or parsing failed
             # Try to parse free-form text
             logger.warning("Could not find JSON in LLM response, falling back to text parsing")
