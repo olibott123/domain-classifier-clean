@@ -102,7 +102,7 @@ def extract_domain_from_email(email):
         return None
 
 def crawl_website(url):
-    """Crawl a website using Apify."""
+    """Crawl a website using Apify with improved timeout handling."""
     try:
         logger.info(f"Starting crawl for {url}")
         
@@ -110,33 +110,69 @@ def crawl_website(url):
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
         payload = {
             "startUrls": [{"url": url}],
-            "maxCrawlingDepth": 1,  # Limit depth for faster crawls
-            "maxCrawlPages": 10     # Limit pages for faster crawls
+            "maxCrawlingDepth": 1,      # Limit depth for faster crawls
+            "maxCrawlPages": 5,         # Reduced from 10 to 5 for faster crawls
+            "timeoutSecs": 120          # Set explicit timeout for Apify
         }
         headers = {"Content-Type": "application/json"}
         
-        response = requests.post(endpoint, json=payload, headers=headers)
-        response.raise_for_status()
-        run_id = response.json()['data']['id']
-        
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            run_id = response.json()['data']['id']
+        except Exception as e:
+            logger.error(f"Error starting crawl: {e}")
+            return None
+            
         # Wait for crawl to complete
         endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
         
-        max_attempts = 30  # Try for up to 5 minutes (30 * 10 seconds)
+        max_attempts = 12  # Reduced from 30 to 12 (about 2 minutes total)
         for attempt in range(max_attempts):
             logger.info(f"Checking crawl results, attempt {attempt+1}/{max_attempts}")
             
-            response = requests.get(endpoint)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = requests.get(endpoint, timeout=10)  # Shorter timeout for status checks
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if data:
+                        combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
+                        if combined_text:
+                            logger.info(f"Crawl completed, got {len(combined_text)} characters of content")
+                            return combined_text
+                        else:
+                            logger.warning(f"Crawl returned data but no text content")
+                else:
+                    logger.warning(f"Received status code {response.status_code} when checking crawl results")
+            except requests.exceptions.Timeout:
+                logger.warning(f"Timeout when checking crawl status (attempt {attempt+1})")
+            except Exception as e:
+                logger.warning(f"Error checking crawl status: {e}")
             
-            if data:
-                combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
-                logger.info(f"Crawl completed, got {len(combined_text)} characters of content")
-                return combined_text
+            # Check if we've tried enough times and should try the fallback approach
+            if attempt == 5:  # After about 50 seconds (6 attempts)
+                logger.info("Trying fallback approach with direct request...")
+                try:
+                    direct_response = requests.get(url, timeout=15)
+                    if direct_response.status_code == 200:
+                        # Use a simple content extraction approach
+                        text_content = direct_response.text
+                        
+                        # Extract readable text by removing HTML tags (simple approach)
+                        import re
+                        clean_text = re.sub(r'<[^>]+>', ' ', text_content)
+                        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                        
+                        if clean_text and len(clean_text) > 100:
+                            logger.info(f"Direct request successful, got {len(clean_text)} characters")
+                            return clean_text
+                except Exception as e:
+                    logger.warning(f"Direct request failed: {e}")
             
             if attempt < max_attempts - 1:
-                time.sleep(10)
+                time.sleep(10)  # 10-second sleep between checks
         
         logger.warning(f"Crawl timed out after {max_attempts} attempts")
         return None
@@ -302,7 +338,7 @@ def classify_domain():
             if not content:
                 error_result = {
                     "domain": domain,
-                    "error": "Failed to crawl website",
+                    "error": "Failed to crawl website or website has insufficient content",
                     "company_type": "Unknown",
                     "low_confidence": True
                 }
@@ -311,7 +347,7 @@ def classify_domain():
                 if email:
                     error_result["email"] = email
                     
-                return jsonify(error_result), 500
+                return jsonify(error_result), 503  # Changed from 500 to 503 (Service Unavailable)
         
         # Classify the content
         if not llm_classifier:
