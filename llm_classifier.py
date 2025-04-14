@@ -45,7 +45,9 @@ class LLMClassifier:
             "cloud management", "network controller", "remote management",
             "router", "access point", "controller", "network infrastructure",
             "deployment", "omada", "uisp", "firewall", "vpn", "dns", "gateway",
-            "ip", "bandwidth", "cloud platform", "platform as a service"
+            "ip", "bandwidth", "cloud platform", "platform as a service",
+            "managed services", "it provider", "technology services", "it consulting",
+            "software management", "hardware support", "it maintenance", "system administration"
         ])
         
         self.commercial_av_indicators = [
@@ -150,6 +152,44 @@ class LLMClassifier:
         # and let the normal classifier handle it with appropriate confidence levels
         return False
 
+    def _adjust_confidence_scores(self, scores, predicted_class):
+        """
+        Adjust confidence scores to ensure better differentiation between categories.
+        Particularly reduces scores for categories that don't match the business.
+        
+        Args:
+            scores: Dict of current confidence scores
+            predicted_class: The predicted category
+            
+        Returns:
+            Dict: Adjusted confidence scores
+        """
+        # Get highest and lowest scores
+        highest_score = scores[predicted_class]
+        lowest_category = min(scores.items(), key=lambda x: x[1])[0]
+        lowest_score = scores[lowest_category]
+        
+        # Apply different adjustments based on highest score
+        if highest_score > 0.7:  # Very confident prediction
+            # For very confident predictions, drastically reduce the lowest score
+            scores[lowest_category] = min(lowest_score * 0.3, 0.08)
+        elif highest_score > 0.5:  # Moderately confident prediction
+            # For moderately confident predictions, significantly reduce lowest score
+            scores[lowest_category] = min(lowest_score * 0.5, 0.12)
+        else:  # Low confidence prediction
+            # Even for low confidence, ensure some differentiation
+            scores[lowest_category] = min(lowest_score * 0.7, 0.15)
+        
+        # Special case: If it's an MSP with high confidence, residential score should be very low
+        if predicted_class == "Managed Service Provider" and highest_score > 0.5:
+            scores["Integrator - Residential A/V"] = min(scores["Integrator - Residential A/V"], 0.08)
+        
+        # Special case: If it's residential with high confidence, MSP score should be low
+        if predicted_class == "Integrator - Residential A/V" and highest_score > 0.5:
+            scores["Managed Service Provider"] = min(scores["Managed Service Provider"], 0.12)
+        
+        return scores
+
     def classify(self, text_content: str, domain: str = None) -> Dict[str, Any]:
         """
         Classify text content to determine company type.
@@ -185,10 +225,10 @@ class LLMClassifier:
                     "predicted_class": "Managed Service Provider",
                     "confidence_scores": {
                         "Managed Service Provider": 0.85,
-                        "Integrator - Commercial A/V": 0.45,
-                        "Integrator - Residential A/V": 0.25
+                        "Integrator - Commercial A/V": 0.20,
+                        "Integrator - Residential A/V": 0.05
                     },
-                    "llm_explanation": "HostiFi is a cloud management platform for UniFi, UISP, and Omada network controllers. It provides managed hosting services for network infrastructure, which is typical of a Managed Service Provider (MSP).",
+                    "llm_explanation": "HostiFi is a cloud management platform for UniFi, UISP, and Omada network controllers. It provides managed hosting services for network infrastructure, which is typical of a Managed Service Provider (MSP). There is no indication of any audio/visual integration services for either commercial or residential environments.",
                     "detection_method": "domain_recognition",
                     "low_confidence": False
                 }
@@ -202,8 +242,8 @@ class LLMClassifier:
                 "predicted_class": "Managed Service Provider",  # Default fallback
                 "confidence_scores": {
                     "Managed Service Provider": 0.05,
-                    "Integrator - Commercial A/V": 0.04,
-                    "Integrator - Residential A/V": 0.03
+                    "Integrator - Commercial A/V": 0.03,
+                    "Integrator - Residential A/V": 0.01
                 },
                 "llm_explanation": "This domain appears to be empty or parked. Unable to determine the company type with confidence.",
                 "detection_method": "minimal_content_detection",
@@ -235,6 +275,8 @@ Commercial A/V Integrators focus on audiovisual technology for businesses, such 
 
 Residential A/V Integrators specialize in home theater, smart home technology, residential automation, and audio/video systems for homes.
 
+For any categories that clearly don't match the company's services, assign very low scores (0.01-0.15).
+
 Even with minimal content, try to make the best classification possible based on what's available. Look for subtle indicators in organization names, terminology, or context clues.
 
 **YOU MUST ANSWER IN VALID JSON FORMAT EXACTLY AS SHOWN BELOW, WITH NO OTHER TEXT BEFORE OR AFTER THE JSON**:
@@ -251,10 +293,11 @@ Even with minimal content, try to make the best classification possible based on
 IMPORTANT GUIDELINES:
 - Your response MUST be a single, properly formatted JSON object with no preamble, no leading or trailing text, and no extra characters.
 - You must provide DIFFERENT confidence scores for each category - they should NOT all be the same value.
-- When the evidence clearly points to one category, you should assign a HIGH confidence score (0.7-0.9) to that category and LOWER scores to the others.
+- When the evidence clearly points to one category, you should assign a HIGH confidence score (0.7-0.9) to that category and VERY LOW scores (0.05-0.15) to categories that clearly don't match.
 - Only use low or moderate confidence scores (0.3-0.6) when the evidence is genuinely ambiguous or minimal.
+- For categories that don't match at all, use extremely low scores (0.01-0.10).
 - The scores should reflect how confident you are that the company belongs to each category, with higher numbers indicating higher confidence.
-- Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence found in the text.
+- Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence from the text.
 - If there isn't enough information in the text, assign low confidence scores (below 0.3) and note this in your explanation.
 - Ensure your JSON is properly formatted with no trailing commas.
 """
@@ -331,7 +374,7 @@ IMPORTANT GUIDELINES:
   "llm_explanation": "Your detailed explanation here"
 }
 
-IMPORTANT: If the evidence strongly points to one category, give it a high confidence score (0.7-0.9)."""
+IMPORTANT: If the evidence strongly points to one category, give it a high confidence score (0.7-0.9) and very low scores (0.05-0.15) to categories that clearly don't match."""
                 
                 # Make retry request to Anthropic API
                 retry_data = {
@@ -408,7 +451,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         elif category == list(parsed_json["confidence_scores"].keys())[0]:
                             parsed_json["confidence_scores"][category] = min(base_score + 0.15, 0.90)
                         else:
-                            parsed_json["confidence_scores"][category] = base_score
+                            parsed_json["confidence_scores"][category] = max(base_score - 0.1, 0.05)
                 
                 # Ensure explanation is substantial
                 if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
@@ -444,7 +487,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         # Apply proportional reduction to all scores
                         for category in parsed_json["confidence_scores"]:
                             original = parsed_json["confidence_scores"][category]
-                            parsed_json["confidence_scores"][category] = max(0.15, original * reduction_factor)
+                            parsed_json["confidence_scores"][category] = max(0.05, original * reduction_factor)
                     
                     # Add note about minimal content to explanation
                     parsed_json["llm_explanation"] += " Note: This classification is based on limited website content, which may affect accuracy."
@@ -460,17 +503,11 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 max_confidence = max(parsed_json["confidence_scores"].values())
                 parsed_json["low_confidence"] = max_confidence < 0.4
                 
-                # Domain-specific overrides for confidence scores
-                if domain:
-                    domain_lower = domain.lower()
-                    
-                    # Networks/Hosting domains are most likely MSPs
-                    if any(term in domain_lower for term in ["host", "hosting", "wifi", "fi", "net", "network"]):
-                        if parsed_json["predicted_class"] == "Managed Service Provider":
-                            # Boost confidence for MSP if that's already the prediction
-                            current = parsed_json["confidence_scores"]["Managed Service Provider"]
-                            parsed_json["confidence_scores"]["Managed Service Provider"] = min(current * 1.2, 0.95)
-                            logger.info(f"Boosted MSP confidence for network/hosting domain: {domain}")
+                # Apply additional score adjustments for better differentiation
+                parsed_json["confidence_scores"] = self._adjust_confidence_scores(
+                    parsed_json["confidence_scores"], 
+                    parsed_json["predicted_class"]
+                )
                 
                 return parsed_json
                 
@@ -609,9 +646,9 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
             if "hostifi" in domain_lower:
                 logger.info(f"Special case in text parsing: {domain} is recognized as MSP")
                 result["predicted_class"] = "Managed Service Provider"
-                result["confidence_scores"]["Managed Service Provider"] = 0.70
-                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.45
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.25
+                result["confidence_scores"]["Managed Service Provider"] = 0.80
+                result["confidence_scores"]["Integrator - Commercial A/V"] = 0.15
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.05
                 result["llm_explanation"] = "HostiFi is a cloud platform for network management, which is characteristic of a Managed Service Provider. It focuses on Unifi, UISP, and other networking technologies."
                 result["detection_method"] = "domain_recognition"
                 result["low_confidence"] = False
@@ -646,12 +683,12 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 result["predicted_class"] = "Managed Service Provider"
                 result["confidence_scores"]["Managed Service Provider"] = 0.25 + (msp_count * 0.02)
                 result["confidence_scores"]["Integrator - Commercial A/V"] = 0.15 + (commercial_count * 0.01)
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.10 + (residential_count * 0.01)
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.05 + (residential_count * 0.005)
             elif commercial_count >= msp_count and commercial_count >= residential_count:
                 result["predicted_class"] = "Integrator - Commercial A/V"
                 result["confidence_scores"]["Integrator - Commercial A/V"] = 0.25 + (commercial_count * 0.02)
                 result["confidence_scores"]["Managed Service Provider"] = 0.15 + (msp_count * 0.01)
-                result["confidence_scores"]["Integrator - Residential A/V"] = 0.10 + (residential_count * 0.01)
+                result["confidence_scores"]["Integrator - Residential A/V"] = 0.05 + (residential_count * 0.005)
             else:
                 result["predicted_class"] = "Integrator - Residential A/V"
                 result["confidence_scores"]["Integrator - Residential A/V"] = 0.25 + (residential_count * 0.02)
@@ -699,9 +736,9 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
         # Calculate dynamic confidence scores (without normalization) - with higher starting values
         if total_score > 0:
             # More assertive confidence calculations for text parsing - higher base values and steeper scaling
-            result["confidence_scores"]["Managed Service Provider"] = min(0.3 + (0.6 * msp_score / max(msp_score + 5, 1)), 0.95) if msp_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.3 + (0.6 * commercial_score / max(commercial_score + 5, 1)), 0.95) if commercial_score > 0 else 0.1
-            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.3 + (0.6 * residential_score / max(residential_score + 5, 1)), 0.95) if residential_score > 0 else 0.1
+            result["confidence_scores"]["Managed Service Provider"] = min(0.3 + (0.6 * msp_score / max(msp_score + 5, 1)), 0.95) if msp_score > 0 else 0.05
+            result["confidence_scores"]["Integrator - Commercial A/V"] = min(0.3 + (0.6 * commercial_score / max(commercial_score + 5, 1)), 0.95) if commercial_score > 0 else 0.05
+            result["confidence_scores"]["Integrator - Residential A/V"] = min(0.3 + (0.6 * residential_score / max(residential_score + 5, 1)), 0.95) if residential_score > 0 else 0.05
             
             # Determine predicted class based on scores
             if msp_score > commercial_score and msp_score > residential_score:
@@ -740,10 +777,12 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                             if any(term in domain_lower for term in ["health", "care", "medical", "society", "foundation", "org"]):
                                 result["predicted_class"] = "Managed Service Provider"
                                 result["confidence_scores"]["Managed Service Provider"] = 0.35
+                                result["confidence_scores"]["Integrator - Residential A/V"] = 0.08
                             # Network/hosting companies are MSPs
                             elif any(term in domain_lower for term in ["host", "fi", "net", "tech", "it", "cloud"]):
                                 result["predicted_class"] = "Managed Service Provider"
                                 result["confidence_scores"]["Managed Service Provider"] = 0.45
+                                result["confidence_scores"]["Integrator - Residential A/V"] = 0.08
                             else:
                                 # Default to Commercial AV as the middle ground
                                 result["predicted_class"] = "Integrator - Commercial A/V"
@@ -777,10 +816,14 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 result["predicted_class"] = best_category[0]
                 result["confidence_scores"][best_category[0]] = 0.3 + (0.05 * best_category[1])
                 
-                # Set other scores proportionally lower
+                # Set other scores proportionally lower with minimum for irrelevant categories
                 for category in result["confidence_scores"]:
                     if category != best_category[0]:
-                        result["confidence_scores"][category] = 0.1 + (0.03 * domain_scores[category])
+                        if domain_scores[category] > 0:
+                            result["confidence_scores"][category] = 0.1 + (0.03 * domain_scores[category])
+                        else:
+                            # If no clues found, use a very low score
+                            result["confidence_scores"][category] = 0.08
             else:
                 # If no indicators found, check domain name for clues
                 if domain:
@@ -789,31 +832,31 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     if any(term in domain_lower for term in ["host", "fi", "net", "tech", "it", "cloud", "data"]):
                         result["predicted_class"] = "Managed Service Provider"
                         result["confidence_scores"]["Managed Service Provider"] = 0.35
-                        result["confidence_scores"]["Integrator - Commercial A/V"] = 0.20
-                        result["confidence_scores"]["Integrator - Residential A/V"] = 0.15
+                        result["confidence_scores"]["Integrator - Commercial A/V"] = 0.18
+                        result["confidence_scores"]["Integrator - Residential A/V"] = 0.08
                     elif any(term in domain_lower for term in ["av", "audio", "video", "media"]):
                         if any(term in domain_lower for term in ["home", "house", "residential"]):
                             result["predicted_class"] = "Integrator - Residential A/V"
                             result["confidence_scores"]["Integrator - Residential A/V"] = 0.35
                             result["confidence_scores"]["Integrator - Commercial A/V"] = 0.25
-                            result["confidence_scores"]["Managed Service Provider"] = 0.15
+                            result["confidence_scores"]["Managed Service Provider"] = 0.10
                         else:
                             result["predicted_class"] = "Integrator - Commercial A/V"
                             result["confidence_scores"]["Integrator - Commercial A/V"] = 0.35
-                            result["confidence_scores"]["Integrator - Residential A/V"] = 0.25
-                            result["confidence_scores"]["Managed Service Provider"] = 0.15
+                            result["confidence_scores"]["Integrator - Residential A/V"] = 0.18
+                            result["confidence_scores"]["Managed Service Provider"] = 0.10
                     else:
                         # Default to commercial AV with low confidence
                         result["predicted_class"] = "Integrator - Commercial A/V"
                         result["confidence_scores"]["Integrator - Commercial A/V"] = 0.20
-                        result["confidence_scores"]["Integrator - Residential A/V"] = 0.15
-                        result["confidence_scores"]["Managed Service Provider"] = 0.10
+                        result["confidence_scores"]["Integrator - Residential A/V"] = 0.10
+                        result["confidence_scores"]["Managed Service Provider"] = 0.08
                 else:
                     # If no indicators found, default to commercial AV with low confidence
                     result["predicted_class"] = "Integrator - Commercial A/V"
                     result["confidence_scores"]["Integrator - Commercial A/V"] = 0.20
-                    result["confidence_scores"]["Integrator - Residential A/V"] = 0.15
-                    result["confidence_scores"]["Managed Service Provider"] = 0.10
+                    result["confidence_scores"]["Integrator - Residential A/V"] = 0.10
+                    result["confidence_scores"]["Managed Service Provider"] = 0.08
         
         # Ensure the predicted class always has the highest confidence score
         highest_category = max(result["confidence_scores"], key=result["confidence_scores"].get)
@@ -827,18 +870,11 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
         max_confidence = max(result["confidence_scores"].values())
         result["low_confidence"] = max_confidence < 0.4
         
-        # Amplify the spread between scores to create more confidence in the winner
-        if not result["low_confidence"]:
-            # Get the winner score
-            winner_score = result["confidence_scores"][result["predicted_class"]]
-            # Amplify it by pushing it higher
-            winner_score = min(winner_score * 1.2, 0.95)
-            # Reduce the other scores
-            for category in result["confidence_scores"]:
-                if category != result["predicted_class"]:
-                    result["confidence_scores"][category] = max(result["confidence_scores"][category] * 0.8, 0.1)
-            # Update the winner score
-            result["confidence_scores"][result["predicted_class"]] = winner_score
+        # Apply additional score adjustments for better differentiation
+        result["confidence_scores"] = self._adjust_confidence_scores(
+            result["confidence_scores"],
+            result["predicted_class"]
+        )
             
         return result
 
@@ -863,8 +899,8 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "predicted_class": "Managed Service Provider",
                     "confidence_scores": {
                         "Managed Service Provider": 0.65,
-                        "Integrator - Commercial A/V": 0.35,
-                        "Integrator - Residential A/V": 0.25
+                        "Integrator - Commercial A/V": 0.15,
+                        "Integrator - Residential A/V": 0.05
                     },
                     "llm_explanation": "HostiFi appears to be a managed service provider specializing in network infrastructure and cloud hosting solutions.",
                     "detection_method": "fallback_with_domain_recognition",
@@ -915,15 +951,17 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 confidence = {
                     "Managed Service Provider": min(0.15 + (msp_score * 0.04), 0.75),
                     "Integrator - Commercial A/V": min(0.10 + (commercial_score * 0.03), 0.40),
-                    "Integrator - Residential A/V": min(0.10 + (residential_score * 0.03), 0.40)
+                    "Integrator - Residential A/V": min(0.07 + (residential_score * 0.02), 0.25)
                 }
+                explanation = "This appears to be an IT service provider based on limited available information."
             elif commercial_score > msp_score and commercial_score > residential_score:
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
                     "Integrator - Commercial A/V": min(0.15 + (commercial_score * 0.04), 0.75),
                     "Managed Service Provider": min(0.10 + (msp_score * 0.03), 0.40),
-                    "Integrator - Residential A/V": min(0.10 + (residential_score * 0.03), 0.40)
+                    "Integrator - Residential A/V": min(0.07 + (residential_score * 0.02), 0.25)
                 }
+                explanation = "This appears to be a commercial A/V integrator based on limited available information."
             elif residential_score > msp_score and residential_score > commercial_score:
                 predicted_class = "Integrator - Residential A/V"
                 confidence = {
@@ -931,77 +969,82 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Managed Service Provider": min(0.10 + (msp_score * 0.03), 0.40),
                     "Integrator - Commercial A/V": min(0.10 + (commercial_score * 0.03), 0.40)
                 }
+                explanation = "This appears to be a residential A/V integrator based on limited available information."
             else:
                 # In case of a tie, check domain name
                 if domain_hints["msp"] > domain_hints["commercial"] and domain_hints["msp"] > domain_hints["residential"]:
                     predicted_class = "Managed Service Provider"
                     confidence = {
                         "Managed Service Provider": 0.35,
-                        "Integrator - Commercial A/V": 0.25,
-                        "Integrator - Residential A/V": 0.20
+                        "Integrator - Commercial A/V": 0.20,
+                        "Integrator - Residential A/V": 0.08
                     }
+                    explanation = "Based on the domain name, this appears to be an IT service provider."
                 elif domain_hints["commercial"] > domain_hints["msp"] and domain_hints["commercial"] > domain_hints["residential"]:
                     predicted_class = "Integrator - Commercial A/V"
                     confidence = {
                         "Integrator - Commercial A/V": 0.35,
-                        "Managed Service Provider": 0.25,
-                        "Integrator - Residential A/V": 0.20
+                        "Managed Service Provider": 0.20,
+                        "Integrator - Residential A/V": 0.10
                     }
+                    explanation = "Based on the domain name, this appears to be a commercial A/V integrator."
                 elif domain_hints["residential"] > domain_hints["msp"] and domain_hints["residential"] > domain_hints["commercial"]:
                     predicted_class = "Integrator - Residential A/V"
                     confidence = {
                         "Integrator - Residential A/V": 0.35,
-                        "Managed Service Provider": 0.25,
-                        "Integrator - Commercial A/V": 0.20
+                        "Managed Service Provider": 0.20,
+                        "Integrator - Commercial A/V": 0.25
                     }
+                    explanation = "Based on the domain name, this appears to be a residential A/V integrator."
                 else:
                     # Default to MSP for domains like dementiasociety.org
                     if domain and any(term in domain.lower() for term in ["society", "foundation", "org", "health", "care"]):
                         predicted_class = "Managed Service Provider"
                         confidence = {
                             "Managed Service Provider": 0.30,
-                            "Integrator - Commercial A/V": 0.20,
-                            "Integrator - Residential A/V": 0.15
+                            "Integrator - Commercial A/V": 0.15,
+                            "Integrator - Residential A/V": 0.08
                         }
+                        explanation = "Based on the domain type, this appears to be an organization that likely uses IT services."
                     else:
                         # Otherwise default to commercial AV
                         predicted_class = "Integrator - Commercial A/V"
                         confidence = {
-                            "Integrator - Commercial A/V": 0.35,
-                            "Managed Service Provider": 0.25,
-                            "Integrator - Residential A/V": 0.20
+                            "Integrator - Commercial A/V": 0.25,
+                            "Managed Service Provider": 0.20,
+                            "Integrator - Residential A/V": 0.10
                         }
+                        explanation = "Unable to determine with confidence, defaulting to commercial A/V integrator."
         else:
             # If domain contains hints about org type, use them
             if domain and any(term in domain.lower() for term in ["society", "foundation", "org", "health", "care", "center"]):
                 predicted_class = "Managed Service Provider"
                 confidence = {
                     "Managed Service Provider": 0.30,
-                    "Integrator - Commercial A/V": 0.20,
-                    "Integrator - Residential A/V": 0.15
+                    "Integrator - Commercial A/V": 0.15,
+                    "Integrator - Residential A/V": 0.08
                 }
+                explanation = "Based on the domain type, this appears to be an organization that likely uses IT services."
             elif domain and any(term in domain.lower() for term in ["host", "fi", "net", "tech", "cloud"]):
                 predicted_class = "Managed Service Provider"
                 confidence = {
                     "Managed Service Provider": 0.40,
-                    "Integrator - Commercial A/V": 0.25,
-                    "Integrator - Residential A/V": 0.15
+                    "Integrator - Commercial A/V": 0.15,
+                    "Integrator - Residential A/V": 0.05
                 }
+                explanation = "Based on the domain name, this appears to be a networking or IT service provider."
             else:
                 # If no indicators found, provide a very low confidence default
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
                     "Integrator - Commercial A/V": 0.12,
                     "Managed Service Provider": 0.10,
-                    "Integrator - Residential A/V": 0.08
+                    "Integrator - Residential A/V": 0.05
                 }
-            
-        explanation = "Classification based on limited available information. "
+                explanation = "Classification based on limited available information. Unable to determine with any confidence."
         
-        if domain:
-            explanation += f"Domain name '{domain}' was considered in the analysis."
-        else:
-            explanation += "Limited text content was available for analysis."
+        # Apply additional score adjustments for better differentiation
+        confidence = self._adjust_confidence_scores(confidence, predicted_class)
             
         return {
             "predicted_class": predicted_class,
