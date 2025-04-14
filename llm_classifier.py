@@ -47,7 +47,8 @@ class LLMClassifier:
             "deployment", "omada", "uisp", "firewall", "vpn", "dns", "gateway",
             "ip", "bandwidth", "cloud platform", "platform as a service",
             "managed services", "it provider", "technology services", "it consulting",
-            "software management", "hardware support", "it maintenance", "system administration"
+            "software management", "hardware support", "it maintenance", "system administration",
+            "solutions", "technology solutions", "fiducia", "technology"
         ])
         
         self.commercial_av_indicators = [
@@ -190,6 +191,35 @@ class LLMClassifier:
         
         return scores
 
+    def _generate_complete_explanation(self, predicted_class, domain=None, is_minimal_content=False):
+        """
+        Generate a comprehensive explanation when none is available or when it's too short.
+        
+        Args:
+            predicted_class: The predicted category
+            domain: Optional domain name
+            is_minimal_content: Whether the content was minimal
+            
+        Returns:
+            str: A detailed explanation
+        """
+        domain_name = domain or "The company"
+        
+        if predicted_class == "Managed Service Provider":
+            explanation = f"{domain_name} appears to be a Managed Service Provider (MSP) based on the available evidence. The domain name and content suggest a focus on IT services and technology solutions. MSPs typically provide IT infrastructure management, technical support, cloud services, and cybersecurity services to businesses."
+        elif predicted_class == "Integrator - Commercial A/V":
+            explanation = f"{domain_name} appears to be a Commercial A/V Integrator based on the available evidence. The content suggests a focus on audiovisual solutions for business environments like conference rooms, meeting spaces, and commercial buildings. Commercial A/V integrators typically install and maintain presentation systems, digital signage, and corporate communication technology."
+        elif predicted_class == "Integrator - Residential A/V":
+            explanation = f"{domain_name} appears to be a Residential A/V Integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and residential audiovisual solutions. Residential A/V integrators typically install and configure home theater systems, whole-house audio, and smart home control systems."
+        else:
+            explanation = f"Based on the available evidence, {domain_name} has been classified as {predicted_class}. The domain name and website content were analyzed to determine the most likely business category."
+        
+        # Add note about minimal content if applicable
+        if is_minimal_content:
+            explanation += " Note: This classification is based on limited website content, which may affect accuracy."
+            
+        return explanation
+
     def classify(self, text_content: str, domain: str = None) -> Dict[str, Any]:
         """
         Classify text content to determine company type.
@@ -228,7 +258,7 @@ class LLMClassifier:
                         "Integrator - Commercial A/V": 0.20,
                         "Integrator - Residential A/V": 0.05
                     },
-                    "llm_explanation": "HostiFi is a cloud management platform for UniFi, UISP, and Omada network controllers. It provides managed hosting services for network infrastructure, which is typical of a Managed Service Provider (MSP). There is no indication of any audio/visual integration services for either commercial or residential environments.",
+                    "llm_explanation": f"HostiFi is a cloud management platform for UniFi, UISP, and Omada network controllers. It provides managed hosting services for network infrastructure, which is typical of a Managed Service Provider (MSP). {domain} specializes in network device management and cloud-hosted controllers, allowing MSPs and IT professionals to remotely manage their networking infrastructure. There is no indication of any audio/visual integration services for either commercial or residential environments.",
                     "detection_method": "domain_recognition",
                     "low_confidence": False
                 }
@@ -238,6 +268,8 @@ class LLMClassifier:
             logger.warning(f"Domain {domain or 'unknown'} appears to be completely empty or parked")
             
             # Fallback with minimal differentiation
+            explanation = f"This domain appears to be empty or parked. Unable to determine the company type with confidence. {domain or 'The website'} has insufficient content to make a reliable classification."
+            
             return {
                 "predicted_class": "Managed Service Provider",  # Default fallback
                 "confidence_scores": {
@@ -245,7 +277,7 @@ class LLMClassifier:
                     "Integrator - Commercial A/V": 0.03,
                     "Integrator - Residential A/V": 0.01
                 },
-                "llm_explanation": "This domain appears to be empty or parked. Unable to determine the company type with confidence.",
+                "llm_explanation": explanation,
                 "detection_method": "minimal_content_detection",
                 "low_confidence": True
             }
@@ -279,6 +311,8 @@ For any categories that clearly don't match the company's services, assign very 
 
 Even with minimal content, try to make the best classification possible based on what's available. Look for subtle indicators in organization names, terminology, or context clues.
 
+You MUST provide a detailed explanation (at least 200 characters) that justifies your classification. Explain your reasoning clearly, citing specific evidence from the text.
+
 **YOU MUST ANSWER IN VALID JSON FORMAT EXACTLY AS SHOWN BELOW, WITH NO OTHER TEXT BEFORE OR AFTER THE JSON**:
 {{
   "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
@@ -297,7 +331,7 @@ IMPORTANT GUIDELINES:
 - Only use low or moderate confidence scores (0.3-0.6) when the evidence is genuinely ambiguous or minimal.
 - For categories that don't match at all, use extremely low scores (0.01-0.10).
 - The scores should reflect how confident you are that the company belongs to each category, with higher numbers indicating higher confidence.
-- Your llm_explanation field MUST be detailed (at least 3-4 sentences) and explain the reasoning behind your classification, citing specific evidence from the text.
+- Your llm_explanation field MUST be detailed (at least 200 characters) and explain the reasoning behind your classification, citing specific evidence from the text.
 - If there isn't enough information in the text, assign low confidence scores (below 0.3) and note this in your explanation.
 - Ensure your JSON is properly formatted with no trailing commas.
 """
@@ -371,7 +405,7 @@ IMPORTANT GUIDELINES:
     "Integrator - Residential A/V": 0.XX,
     "Managed Service Provider": 0.XX
   },
-  "llm_explanation": "Your detailed explanation here"
+  "llm_explanation": "Your detailed explanation here (at least 200 characters, explaining your reasoning and citing evidence from the text)"
 }
 
 IMPORTANT: If the evidence strongly points to one category, give it a high confidence score (0.7-0.9) and very low scores (0.05-0.15) to categories that clearly don't match."""
@@ -454,10 +488,15 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                             parsed_json["confidence_scores"][category] = max(base_score - 0.1, 0.05)
                 
                 # Ensure explanation is substantial
-                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"]:
-                    parsed_json["llm_explanation"] = self._extract_explanation(text_response)
+                if "llm_explanation" not in parsed_json or not parsed_json["llm_explanation"] or len(parsed_json["llm_explanation"]) < 100:
+                    # Generate a complete explanation
+                    parsed_json["llm_explanation"] = self._generate_complete_explanation(
+                        parsed_json["predicted_class"], 
+                        domain,
+                        is_minimal_content
+                    )
                 
-                # If explanation is generic, try to extract a better one
+                # If explanation is generic, generate a better one
                 generic_explanations = [
                     "Classification based on analysis of website content",
                     "Based on the available information",
@@ -465,10 +504,12 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 ]
                 
                 explanation = parsed_json["llm_explanation"]
-                if any(generic in explanation for generic in generic_explanations) or len(explanation) < 50:
-                    better_explanation = self._extract_explanation(text_response)
-                    if len(better_explanation) > len(explanation):
-                        parsed_json["llm_explanation"] = better_explanation
+                if any(generic in explanation for generic in generic_explanations) or len(explanation) < 100:
+                    parsed_json["llm_explanation"] = self._generate_complete_explanation(
+                        parsed_json["predicted_class"], 
+                        domain,
+                        is_minimal_content
+                    )
                 
                 # Adjust confidence for minimal content sites
                 if is_minimal_content:
@@ -490,7 +531,8 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                             parsed_json["confidence_scores"][category] = max(0.05, original * reduction_factor)
                     
                     # Add note about minimal content to explanation
-                    parsed_json["llm_explanation"] += " Note: This classification is based on limited website content, which may affect accuracy."
+                    if "Note: This classification is based on limited website content" not in parsed_json["llm_explanation"]:
+                        parsed_json["llm_explanation"] += " Note: This classification is based on limited website content, which may affect accuracy."
                     
                     # Set detection method
                     parsed_json["detection_method"] = "llm_with_minimal_content"
@@ -514,7 +556,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
             # If we get here, either no JSON was found or parsing failed
             # Try to parse free-form text
             logger.warning("Could not find JSON in LLM response, falling back to text parsing")
-            parsed_result = self._parse_free_text(text_response, domain)
+            parsed_result = self._parse_free_text(text_response, domain, is_minimal_content)
             logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
             
             # Adjust confidence for minimal content
@@ -522,7 +564,8 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 for category in parsed_result["confidence_scores"]:
                     parsed_result["confidence_scores"][category] = min(parsed_result["confidence_scores"][category], 0.6)
                 parsed_result["detection_method"] = "text_parsing_with_minimal_content"
-                parsed_result["llm_explanation"] += " Note: This classification is based on limited website content."
+                if "Note: This classification is based on limited website content" not in parsed_result["llm_explanation"]:
+                    parsed_result["llm_explanation"] += " Note: This classification is based on limited website content, which may affect accuracy."
             
             return parsed_result
             
@@ -615,13 +658,14 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
         # Return the default
         return default
 
-    def _parse_free_text(self, text_content: str, domain: str = None) -> Dict[str, Any]:
+    def _parse_free_text(self, text_content: str, domain: str = None, is_minimal_content: bool = False) -> Dict[str, Any]:
         """
         Parse free-form text to extract classification and confidence scores.
         
         Args:
             text_content: The text to parse
             domain: Optional domain name for additional context
+            is_minimal_content: Whether the content was minimal
             
         Returns:
             dict: The parsed classification results
@@ -649,7 +693,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 result["confidence_scores"]["Managed Service Provider"] = 0.80
                 result["confidence_scores"]["Integrator - Commercial A/V"] = 0.15
                 result["confidence_scores"]["Integrator - Residential A/V"] = 0.05
-                result["llm_explanation"] = "HostiFi is a cloud platform for network management, which is characteristic of a Managed Service Provider. It focuses on Unifi, UISP, and other networking technologies."
+                result["llm_explanation"] = f"HostiFi is a cloud platform for network management, which is characteristic of a Managed Service Provider. {domain} specializes in UniFi, UISP, and other networking technologies, offering cloud-hosted controllers and management tools. This is clearly focused on network infrastructure management rather than audio/visual integration services."
                 result["detection_method"] = "domain_recognition"
                 result["low_confidence"] = False
                 return result
@@ -694,6 +738,13 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                 result["confidence_scores"]["Integrator - Residential A/V"] = 0.25 + (residential_count * 0.02)
                 result["confidence_scores"]["Managed Service Provider"] = 0.15 + (msp_count * 0.01)
                 result["confidence_scores"]["Integrator - Commercial A/V"] = 0.10 + (commercial_count * 0.01)
+            
+            # Generate a complete explanation
+            result["llm_explanation"] = self._generate_complete_explanation(
+                result["predicted_class"], 
+                domain,
+                is_minimal_content
+            )
                 
             return result
         
@@ -875,6 +926,14 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
             result["confidence_scores"],
             result["predicted_class"]
         )
+        
+        # Ensure we have a substantial explanation
+        if not result["llm_explanation"] or len(result["llm_explanation"]) < 100:
+            result["llm_explanation"] = self._generate_complete_explanation(
+                result["predicted_class"], 
+                domain,
+                is_minimal_content
+            )
             
         return result
 
@@ -895,6 +954,8 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
             
             # HostiFi is known to be an MSP
             if "hostifi" in domain_lower:
+                explanation = f"HostiFi appears to be a managed service provider specializing in network infrastructure and cloud hosting solutions. {domain} provides cloud-based controllers and management tools for network devices, primarily targeting IT service providers and network administrators."
+                
                 return {
                     "predicted_class": "Managed Service Provider",
                     "confidence_scores": {
@@ -902,7 +963,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         "Integrator - Commercial A/V": 0.15,
                         "Integrator - Residential A/V": 0.05
                     },
-                    "llm_explanation": "HostiFi appears to be a managed service provider specializing in network infrastructure and cloud hosting solutions.",
+                    "llm_explanation": explanation,
                     "detection_method": "fallback_with_domain_recognition",
                     "low_confidence": False
                 }
@@ -953,7 +1014,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Integrator - Commercial A/V": min(0.10 + (commercial_score * 0.03), 0.40),
                     "Integrator - Residential A/V": min(0.07 + (residential_score * 0.02), 0.25)
                 }
-                explanation = "This appears to be an IT service provider based on limited available information."
+                explanation = f"{domain or 'This company'} appears to be an IT service provider based on the available evidence. The content suggests a focus on technology services, IT support, and digital solutions for businesses. Managed Service Providers typically offer IT infrastructure management, cybersecurity, cloud services, and technical support."
             elif commercial_score > msp_score and commercial_score > residential_score:
                 predicted_class = "Integrator - Commercial A/V"
                 confidence = {
@@ -961,7 +1022,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Managed Service Provider": min(0.10 + (msp_score * 0.03), 0.40),
                     "Integrator - Residential A/V": min(0.07 + (residential_score * 0.02), 0.25)
                 }
-                explanation = "This appears to be a commercial A/V integrator based on limited available information."
+                explanation = f"{domain or 'This company'} appears to be a commercial A/V integrator based on the available evidence. The content suggests a focus on audiovisual solutions for businesses, such as conference rooms, digital signage, and corporate communication systems. Commercial A/V integrators typically design, install, and maintain technology for professional environments."
             elif residential_score > msp_score and residential_score > commercial_score:
                 predicted_class = "Integrator - Residential A/V"
                 confidence = {
@@ -969,7 +1030,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Managed Service Provider": min(0.10 + (msp_score * 0.03), 0.40),
                     "Integrator - Commercial A/V": min(0.10 + (commercial_score * 0.03), 0.40)
                 }
-                explanation = "This appears to be a residential A/V integrator based on limited available information."
+                explanation = f"{domain or 'This company'} appears to be a residential A/V integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and residential audiovisual systems. Residential A/V integrators typically install and configure home theaters, whole-house audio, and smart home control systems."
             else:
                 # In case of a tie, check domain name
                 if domain_hints["msp"] > domain_hints["commercial"] and domain_hints["msp"] > domain_hints["residential"]:
@@ -979,7 +1040,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         "Integrator - Commercial A/V": 0.20,
                         "Integrator - Residential A/V": 0.08
                     }
-                    explanation = "Based on the domain name, this appears to be an IT service provider."
+                    explanation = f"Based on the domain name {domain}, this appears to be an IT service provider. The domain suggests a focus on technology services and IT solutions. Managed Service Providers typically offer IT infrastructure management, cloud services, and technical support to businesses."
                 elif domain_hints["commercial"] > domain_hints["msp"] and domain_hints["commercial"] > domain_hints["residential"]:
                     predicted_class = "Integrator - Commercial A/V"
                     confidence = {
@@ -987,7 +1048,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         "Managed Service Provider": 0.20,
                         "Integrator - Residential A/V": 0.10
                     }
-                    explanation = "Based on the domain name, this appears to be a commercial A/V integrator."
+                    explanation = f"Based on the domain name {domain}, this appears to be a commercial A/V integrator. The domain suggests a focus on audiovisual solutions for businesses. Commercial A/V integrators typically design and install technology for professional environments like conference rooms and corporate offices."
                 elif domain_hints["residential"] > domain_hints["msp"] and domain_hints["residential"] > domain_hints["commercial"]:
                     predicted_class = "Integrator - Residential A/V"
                     confidence = {
@@ -995,7 +1056,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                         "Managed Service Provider": 0.20,
                         "Integrator - Commercial A/V": 0.25
                     }
-                    explanation = "Based on the domain name, this appears to be a residential A/V integrator."
+                    explanation = f"Based on the domain name {domain}, this appears to be a residential A/V integrator. The domain suggests a focus on home automation and residential audiovisual systems. Residential A/V integrators typically install home theaters, smart home technology, and whole-house audio systems."
                 else:
                     # Default to MSP for domains like dementiasociety.org
                     if domain and any(term in domain.lower() for term in ["society", "foundation", "org", "health", "care"]):
@@ -1005,7 +1066,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                             "Integrator - Commercial A/V": 0.15,
                             "Integrator - Residential A/V": 0.08
                         }
-                        explanation = "Based on the domain type, this appears to be an organization that likely uses IT services."
+                        explanation = f"Based on the domain type ({domain}), this appears to be an organization that likely uses IT services. Organizations like this typically work with Managed Service Providers for their technology needs rather than being audiovisual integrators themselves."
                     else:
                         # Otherwise default to commercial AV
                         predicted_class = "Integrator - Commercial A/V"
@@ -1014,7 +1075,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                             "Managed Service Provider": 0.20,
                             "Integrator - Residential A/V": 0.10
                         }
-                        explanation = "Unable to determine with confidence, defaulting to commercial A/V integrator."
+                        explanation = f"Based on limited available information for {domain or 'this company'}, we're unable to determine the business type with high confidence. The classification as a Commercial A/V Integrator is tentative and should be verified."
         else:
             # If domain contains hints about org type, use them
             if domain and any(term in domain.lower() for term in ["society", "foundation", "org", "health", "care", "center"]):
@@ -1024,7 +1085,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Integrator - Commercial A/V": 0.15,
                     "Integrator - Residential A/V": 0.08
                 }
-                explanation = "Based on the domain type, this appears to be an organization that likely uses IT services."
+                explanation = f"Based on the domain name ({domain}), this appears to be an organization that likely works with IT service providers rather than being an audiovisual integrator. Organizations of this type typically require IT support and managed services for their operations."
             elif domain and any(term in domain.lower() for term in ["host", "fi", "net", "tech", "cloud"]):
                 predicted_class = "Managed Service Provider"
                 confidence = {
@@ -1032,7 +1093,7 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Integrator - Commercial A/V": 0.15,
                     "Integrator - Residential A/V": 0.05
                 }
-                explanation = "Based on the domain name, this appears to be a networking or IT service provider."
+                explanation = f"Based on the domain name ({domain}), this appears to be a networking or IT service provider. The domain suggests a focus on technology services, hosting, or network infrastructure, which are characteristic of Managed Service Providers."
             else:
                 # If no indicators found, provide a very low confidence default
                 predicted_class = "Integrator - Commercial A/V"
@@ -1041,10 +1102,18 @@ IMPORTANT: If the evidence strongly points to one category, give it a high confi
                     "Managed Service Provider": 0.10,
                     "Integrator - Residential A/V": 0.05
                 }
-                explanation = "Classification based on limited available information. Unable to determine with any confidence."
+                explanation = f"Classification for {domain or 'this company'} is based on extremely limited information. Unable to determine the business type with any confidence. Additional data would be needed for a more accurate classification."
         
         # Apply additional score adjustments for better differentiation
         confidence = self._adjust_confidence_scores(confidence, predicted_class)
+        
+        # If explanation is too short, generate a complete one
+        if len(explanation) < 100:
+            explanation = self._generate_complete_explanation(
+                predicted_class, 
+                domain,
+                is_minimal_content=True
+            )
             
         return {
             "predicted_class": predicted_class,
