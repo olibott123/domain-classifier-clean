@@ -73,7 +73,7 @@ except Exception as e:
             logger.info(f"Fallback: Not saving domain content for {domain}")
             return True, None
             
-        def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
+        def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, llm_explanation):
             logger.info(f"Fallback: Not saving classification for {domain}")
             return True, None
             
@@ -250,28 +250,28 @@ def save_to_snowflake(domain, url, content, classification):
         if 'low_confidence' not in classification:
             classification['low_confidence'] = classification['max_confidence'] < LOW_CONFIDENCE_THRESHOLD
 
-        # Process explanation to ensure it's not truncated mid-sentence
+        # Get explanation directly from classification
         llm_explanation = classification.get('llm_explanation', '')
         
         # If explanation is too long, trim it properly at a sentence boundary
-        if len(llm_explanation) > 500:
-            # Find the last period before 450 chars
-            last_period_index = llm_explanation[:450].rfind('.')
+        if len(llm_explanation) > 4000:
+            # Find the last period before 3900 chars
+            last_period_index = llm_explanation[:3900].rfind('.')
             if last_period_index > 0:
-                shortened_explanation = llm_explanation[:last_period_index + 1]
+                llm_explanation = llm_explanation[:last_period_index + 1]
             else:
                 # If no period found, just truncate with an ellipsis
-                shortened_explanation = llm_explanation[:450] + "..."
-        else:
-            shortened_explanation = llm_explanation
+                llm_explanation = llm_explanation[:3900] + "..."
             
-        # Create model metadata with properly formatted explanation
+        # Create model metadata
         model_metadata = {
             'model_version': '1.0',
-            'llm_model': 'claude-3-haiku-20240307',
-            'llm_explanation': shortened_explanation
+            'llm_model': 'claude-3-haiku-20240307'
         }
         
+        # Convert model metadata to JSON string
+        model_metadata_json = json.dumps(model_metadata)[:4000]  # Limit size
+            
         # Special case for parked domains - save as "Parked Domain" if is_parked flag is set
         company_type = classification.get('predicted_class', 'Unknown')
         if classification.get('is_parked', False):
@@ -283,9 +283,10 @@ def save_to_snowflake(domain, url, content, classification):
             company_type=str(company_type),
             confidence_score=float(classification['max_confidence']),
             all_scores=json.dumps(classification.get('confidence_scores', {}))[:4000],  # Limit size
-            model_metadata=json.dumps(model_metadata)[:4000],  # Limit size
+            model_metadata=model_metadata_json,
             low_confidence=bool(classification.get('low_confidence', False)),
-            detection_method=str(classification.get('detection_method', 'llm_classification'))
+            detection_method=str(classification.get('detection_method', 'llm_classification')),
+            llm_explanation=llm_explanation  # Add explanation directly to save_classification
         )
         
         return True
@@ -430,6 +431,9 @@ def classify_domain():
         if not force_reclassify:
             existing_record = snowflake_conn.check_existing_classification(domain)
             if existing_record:
+                # Log the full record for debugging
+                logger.info(f"Retrieved record from Snowflake: {existing_record}")
+                
                 # Check if confidence is below threshold for auto-reclassification
                 confidence_score = existing_record.get('confidence_score', 1.0)
                 if confidence_score < AUTO_RECLASSIFY_THRESHOLD:
@@ -445,13 +449,20 @@ def classify_domain():
                     except Exception as e:
                         logger.warning(f"Could not parse all_scores for {domain}: {e}")
                     
-                    # Extract LLM explanation
-                    llm_explanation = ""
-                    try:
-                        metadata = json.loads(existing_record.get('model_metadata', '{}'))
-                        llm_explanation = metadata.get('llm_explanation', '')
-                    except Exception as e:
-                        logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+                    # Extract LLM explanation directly from the LLM_EXPLANATION column
+                    llm_explanation = existing_record.get('LLM_EXPLANATION', '')
+                    
+                    # If LLM_EXPLANATION is not available, try to get it from model_metadata
+                    if not llm_explanation:
+                        try:
+                            metadata = json.loads(existing_record.get('model_metadata', '{}'))
+                            llm_explanation = metadata.get('llm_explanation', '')
+                        except Exception as e:
+                            logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+                    
+                    # Ensure we have an explanation
+                    if not llm_explanation:
+                        llm_explanation = f"The domain {domain} was previously classified as a {existing_record.get('company_type')} based on analysis of website content."
                     
                     # Add low_confidence flag based on confidence score
                     low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
@@ -509,7 +520,7 @@ def classify_domain():
                         "predicted_class": existing_record.get('company_type'),
                         "confidence_score": int(existing_record.get('confidence_score', 0.5) * 100),
                         "confidence_scores": processed_scores,
-                        "explanation": llm_explanation if llm_explanation else 'No explanation available.',
+                        "explanation": llm_explanation,  # Include the explanation here
                         "low_confidence": low_confidence,
                         "detection_method": existing_record.get('detection_method', 'api'),
                         "source": "cached",
@@ -519,6 +530,9 @@ def classify_domain():
                     # Add email to response if input was an email
                     if email:
                         result["email"] = email
+                    
+                    # Log the response for debugging
+                    logger.info(f"Sending response to client: {json.dumps(result)}")
                         
                     return jsonify(result), 200
         
@@ -701,12 +715,17 @@ def classify_domain():
                 # Update max_confidence to match the new highest value
                 max_confidence = 80
             
+            # Ensure explanation exists
+            explanation = classification.get('llm_explanation', '')
+            if not explanation:
+                explanation = f"Based on analysis of website content, {domain} has been classified as a {classification.get('predicted_class')}."
+                
             result = {
                 "domain": domain,
                 "predicted_class": classification.get('predicted_class'),
                 "confidence_score": max_confidence,
                 "confidence_scores": processed_scores,
-                "explanation": classification.get('llm_explanation', 'No explanation available.'),
+                "explanation": explanation,  # Include the explanation here
                 "low_confidence": classification.get('low_confidence', False),
                 "detection_method": classification.get('detection_method', 'api'),
                 "source": "fresh",
@@ -717,6 +736,9 @@ def classify_domain():
         if email:
             result["email"] = email
             
+        # Log the response for debugging
+        logger.info(f"Sending response to client: {json.dumps(result)}")
+        
         return jsonify(result), 200
         
     except Exception as e:
