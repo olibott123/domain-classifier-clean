@@ -62,6 +62,19 @@ class LLMClassifier:
             "home entertainment", "consumer", "residential installation", "home integration"
         ]
         
+        # New indicators for service business detection
+        self.service_business_indicators = [
+            "service", "provider", "solutions", "consulting", "management", "support",
+            "agency", "professional service", "firm", "consultancy", "outsourced"
+        ]
+        
+        # Indicators for internal IT potential
+        self.internal_it_potential_indicators = [
+            "enterprise", "corporation", "corporate", "company", "business", "organization",
+            "staff", "team", "employees", "personnel", "department", "division",
+            "global", "nationwide", "locations", "offices", "headquarters"
+        ]
+        
         # Indicators that explicitly should NOT lead to specific classifications
         self.negative_indicators = {
             "vacation rental": "NOT_RESIDENTIAL_AV",
@@ -70,12 +83,27 @@ class LLMClassifier:
             "holiday home": "NOT_RESIDENTIAL_AV",
             "vacation home": "NOT_RESIDENTIAL_AV",
             "travel agency": "NOT_RESIDENTIAL_AV",
-            "booking site": "NOT_RESIDENTIAL_AV"
+            "booking site": "NOT_RESIDENTIAL_AV",
+            "book your stay": "NOT_RESIDENTIAL_AV",
+            "accommodation": "NOT_RESIDENTIAL_AV",
+            "reserve your": "NOT_RESIDENTIAL_AV",
+            "feriebolig": "NOT_RESIDENTIAL_AV",  # Danish for vacation home
+            "ferie": "NOT_RESIDENTIAL_AV",       # Danish for vacation
+            
+            "add to cart": "NOT_MSP",
+            "add to basket": "NOT_MSP",
+            "shopping cart": "NOT_MSP",
+            "free shipping": "NOT_MSP",
+            "checkout": "NOT_MSP",
+            
+            "our products": "NOT_SERVICE",
+            "product catalog": "NOT_SERVICE",
+            "manufacturer": "NOT_SERVICE"
         }
 
     def _load_examples_from_knowledge_base(self) -> Dict[str, List[Dict[str, str]]]:
         """
-        Load examples from knowledge base CSV file.
+        Load examples from knowledge base CSV file with enhanced logging.
         
         Returns:
             Dict mapping categories to lists of example domains with content
@@ -83,11 +111,13 @@ class LLMClassifier:
         examples = {
             "Managed Service Provider": [],
             "Integrator - Commercial A/V": [],
-            "Integrator - Residential A/V": []
+            "Integrator - Residential A/V": [],
+            "Non-Service Business": []  # New category for non-service examples
         }
         
         try:
             kb_path = "knowledge_base.csv"
+            logger.info(f"Attempting to load knowledge base from {kb_path}")
             
             # Fall back to example_domains.csv if knowledge_base.csv doesn't exist
             if not os.path.exists(kb_path):
@@ -105,6 +135,9 @@ class LLMClassifier:
                                     'domain': row.get('domain', ''),
                                     'content': f"This is a {company_type} specializing in solutions for their clients."
                                 })
+                    logger.info(f"Loaded {sum(len(examples[cat]) for cat in examples)} examples from {kb_path}")
+                    for category in examples:
+                        logger.info(f"Loaded {len(examples[category])} examples for category {category}")
                     return examples
             
             # Regular case - load from knowledge_base.csv which has real content
@@ -121,8 +154,14 @@ class LLMClassifier:
                                     'domain': row[0],
                                     'content': row[2]
                                 })
+                
+                logger.info(f"Successfully loaded {sum(len(examples[cat]) for cat in examples)} examples from {kb_path}")
+                for category in examples:
+                    logger.info(f"Loaded {len(examples[category])} examples for category {category}")
+            else:
+                logger.warning(f"Neither knowledge_base.csv nor example_domains.csv found")
         except Exception as e:
-            logger.warning(f"Could not load knowledge base examples: {e}")
+            logger.error(f"Error loading knowledge base: {e}")
         
         # Ensure we have at least some examples for each category
         for category in examples:
@@ -131,24 +170,29 @@ class LLMClassifier:
                 if category == "Managed Service Provider":
                     examples[category].append({
                         'domain': 'example-msp.com',
-                        'content': 'We provide managed IT services including network management, cybersecurity, cloud solutions, and 24/7 technical support for businesses of all sizes.'
+                        'content': 'We provide managed IT services including network management, cybersecurity, cloud solutions, and 24/7 technical support for businesses of all sizes. Our team of certified engineers can handle all your technology needs from help desk support to cloud infrastructure management.'
                     })
                 elif category == "Integrator - Commercial A/V":
                     examples[category].append({
                         'domain': 'example-commercial-av.com',
-                        'content': 'We design and implement professional audio-visual solutions for businesses, including conference rooms, digital signage systems, and corporate presentation technologies.'
+                        'content': 'We design and implement professional audio-visual solutions for businesses, including conference rooms, digital signage systems, and corporate presentation technologies. Our commercial clients rely on us for integrated communication solutions across their enterprises.'
                     })
-                else:  # Residential A/V
+                elif category == "Integrator - Residential A/V":
                     examples[category].append({
                         'domain': 'example-residential-av.com',
-                        'content': 'We specialize in smart home automation and high-end home theater installations for residential clients, including lighting control, whole-home audio, and custom home cinema rooms.'
+                        'content': 'We specialize in smart home automation and high-end home theater installations for residential clients, including lighting control, whole-home audio, and custom home cinema rooms. Our team creates extraordinary entertainment experiences in luxury homes.'
+                    })
+                else:  # Non-Service Business
+                    examples[category].append({
+                        'domain': 'example-nonservice.com',
+                        'content': 'We are an online retailer selling consumer electronics and accessories. Browse our wide selection of products for your home and office needs. Shop now for great deals on computers, phones, and entertainment gadgets with fast shipping to your door.'
                     })
         
         return examples
 
     def classify(self, text_content: str, domain: str = None) -> Dict[str, Any]:
         """
-        Classify text content to determine company type using few-shot learning.
+        Classify text content following the new decision tree approach.
         
         Args:
             text_content: The text content to classify
@@ -157,54 +201,33 @@ class LLMClassifier:
         Returns:
             dict: The classification results including predicted class and confidence scores
         """
-        # First check if this is a truly parked domain
+        logger.info(f"Starting classification for domain: {domain or 'unknown'}")
+        
+        # STEP 1: Check if processing can complete
+        if not text_content:
+            logger.warning(f"No content provided for domain: {domain or 'unknown'}")
+            return self._create_process_did_not_complete_result(domain)
+            
+        # Cache lowercase text for repeated use
+        self.text_lower = text_content.lower()
+        
+        # STEP 2: Check if this is a parked/minimal domain
         if self._is_parked_domain(text_content):
             logger.info(f"Domain {domain or 'unknown'} is detected as a parked domain")
             return self._create_parked_domain_result(domain)
-        
-        # Check for minimal content domains
+            
         is_minimal_content = self.detect_minimal_content(text_content)
-        
+        if is_minimal_content:
+            logger.info(f"Domain {domain or 'unknown'} has minimal content")
+            
         # Special case handling for specific domains
         if domain:
-            domain_lower = domain.lower()
+            domain_result = self._check_special_domain_cases(domain, text_content)
+            if domain_result:
+                return domain_result
             
-            # Special handling for HostiFi (always MSP)
-            if "hostifi" in domain_lower:
-                logger.info(f"Special case handling for known domain: {domain}")
-                return {
-                    "predicted_class": "Managed Service Provider",
-                    "confidence_scores": {
-                        "Managed Service Provider": 85,
-                        "Integrator - Commercial A/V": 8,
-                        "Integrator - Residential A/V": 5
-                    },
-                    "llm_explanation": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management. They provide managed hosting services for UniFi Controller, UISP, and other network management software, which is a clear indication they are a Managed Service Provider focused on network infrastructure management.",
-                    "detection_method": "domain_override",
-                    "low_confidence": False,
-                    "max_confidence": 0.85
-                }
-            
-            # Check for known vacation rental sites to avoid misclassifying as Residential A/V
-            vacation_terms = ["vacation", "holiday", "rental", "booking", "hotel"]
-            if any(term in domain_lower for term in vacation_terms):
-                # Only log for detailed debugging on certain domains
-                logger.info(f"Checking vacation rental domain: {domain}")
-        
-        # For minimal content domains, use a more conservative approach
-        if is_minimal_content:
-            logger.info(f"Domain {domain or 'unknown'} has minimal content, using minimal content classification")
-            return self._classify_minimal_content(text_content, domain)
-        
-        # Check for content indicators that explicitly rule out certain categories
-        text_lower = text_content.lower()
-        negative_matches = [indicator for indicator, neg_class in self.negative_indicators.items() 
-                           if indicator in text_lower]
-        
-        if negative_matches and any(self.negative_indicators[match] == "NOT_RESIDENTIAL_AV" for match in negative_matches):
-            logger.info(f"Vacation rental indicators found for {domain}: {negative_matches}")
-            
-        # Try to classify using the LLM with few-shot learning
+        # STEP 3: Determine if it's a service/management business
+        # Let's use the LLM for this rather than just keywords
         try:
             if not self.api_key:
                 raise ValueError("No API key provided")
@@ -212,60 +235,15 @@ class LLMClassifier:
             # Load examples from knowledge base
             examples = self._load_examples_from_knowledge_base()
             
-            # Build a few-shot prompt with examples
-            system_prompt = f"""You are an expert business analyst who specializes in categorizing technology companies.
-Your task is to analyze the text from a company's website and classify it into ONE of these categories:
-1. Managed Service Provider (MSP)
-2. Integrator - Commercial A/V
-3. Integrator - Residential A/V
-
-Definitions:
-- MSP: IT service companies that remotely manage customer IT infrastructure and systems
-- Commercial A/V Integrator: Companies that design and install audio/visual systems for businesses
-- Residential A/V Integrator: Companies that design and install audio/visual systems for homes
-
-IMPORTANT: Be extremely careful not to be misled by keywords alone:
-- Vacation rental services that mention "home" are NOT Residential A/V Integrators
-- Travel booking sites are NOT Residential A/V Integrators
-- Media production companies are NOT necessarily A/V integrators
-- Web designers are NOT typically MSPs
-- IT consulting firms are typically MSPs even if they focus on strategy
-
-NOTE: Here are examples of what NOT to classify as:
-- Vacation rental websites that mention "vacation homes" or "holiday houses" are NOT Residential A/V Integrators
-- Hotel or accommodation booking services are NOT Residential A/V Integrators
-- IT consultants that only provide strategy are still considered MSPs
-- Media production companies that create audio/video content are NOT necessarily A/V integrators
-
-Here are examples of correctly classified companies:"""
+            # Log knowledge base usage
+            total_examples = sum(len(examples[cat]) for cat in examples)
+            logger.info(f"Loaded {total_examples} examples from knowledge base")
+            for category in examples:
+                logger.info(f"  - {category}: {len(examples[category])} examples")
             
-            # Add examples to the system prompt
-            for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
-                system_prompt += f"\n\n## {category} examples:\n"
-                for example in examples.get(category, [])[:2]:  # Just use 2 examples per category
-                    snippet = example.get('content', '')[:300].replace('\n', ' ').strip()
-                    system_prompt += f"\nDomain: {example.get('domain', 'example.com')}\nContent snippet: {snippet}...\nClassification: {category}\n"
-            
-            system_prompt += """\nYou MUST provide your analysis in JSON format with the following structure:
-{
-  "predicted_class": "The most likely category (one of: 'Integrator - Commercial A/V', 'Integrator - Residential A/V', 'Managed Service Provider')",
-  "confidence_scores": {
-    "Integrator - Commercial A/V": [Integer from 1-100],
-    "Integrator - Residential A/V": [Integer from 1-100],
-    "Managed Service Provider": [Integer from 1-100]
-  },
-  "llm_explanation": "A detailed explanation of why this classification was chosen, citing specific evidence from the text"
-}
-
-IMPORTANT INSTRUCTIONS:
-1. You MUST provide DIFFERENT confidence scores for each category - they should NOT all be the same value.
-2. Assign scores as integers from 1-100 with higher numbers indicating greater confidence.
-3. For categories that clearly don't match the company, assign VERY LOW scores (1-8).
-4. Your llm_explanation MUST be detailed (at least 200 characters) and explain the reasoning behind your classification.
-5. If there is minimal content, note this in your explanation and provide conservative confidence scores.
-
-YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
-
+            # Build system prompt with the new decision tree approach
+            system_prompt = self._build_decision_tree_prompt(examples)
+                
             # Limit the text content to avoid token limits
             max_chars = 12000
             if len(text_content) > max_chars:
@@ -283,7 +261,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "model": self.model,
                 "system": system_prompt,
                 "messages": [
-                    {"role": "user", "content": f"Here's the text from a company's website to classify: {text_content}"}
+                    {"role": "user", "content": f"Domain name: {domain or 'unknown'}\n\nWebsite content to classify: {text_content}"}
                 ],
                 "max_tokens": 1500,
                 "temperature": 0.1
@@ -301,6 +279,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Extract the response text
             if "content" in response_data and len(response_data["content"]) > 0:
                 text_response = response_data["content"][0]["text"]
+                logger.info(f"Received response from Claude API for {domain}")
             else:
                 logger.error("No content in Claude response")
                 raise Exception("No content in Claude response")
@@ -320,16 +299,20 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     parsed_json["detection_method"] = "llm_classification"
                     
                     # Set low_confidence flag based on highest score
-                    max_confidence = max(parsed_json["confidence_scores"].values())
+                    max_confidence = max(parsed_json["confidence_scores"].values()) if parsed_json["is_service_business"] else 0.5
                     if isinstance(max_confidence, str):
                         try:
                             max_confidence = float(max_confidence)
                         except (ValueError, TypeError):
                             max_confidence = 0
                             
-                    parsed_json["low_confidence"] = max_confidence < 40
+                    parsed_json["low_confidence"] = max_confidence < 40 if parsed_json["is_service_business"] else True
                     
                     logger.info(f"Successful LLM classification for {domain or 'unknown'}: {parsed_json['predicted_class']}")
+                    
+                    # Check if this is a service business
+                    is_service = parsed_json.get("is_service_business", True)
+                    logger.info(f"Domain {domain} service business check: {is_service}")
                     
                     # Return the validated classification
                     return parsed_json
@@ -356,6 +339,164 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             if is_minimal_content:
                 result["detection_method"] = result["detection_method"] + "_with_minimal_content"
             return result
+    
+    def _build_decision_tree_prompt(self, examples: Dict[str, List[Dict[str, str]]]) -> str:
+        """
+        Build a prompt that implements the decision tree approach as explained by the boss.
+        
+        Args:
+            examples: Knowledge base examples
+            
+        Returns:
+            str: The system prompt for the LLM
+        """
+        # Implement the new decision tree prompt
+        system_prompt = """You are an expert business analyst who specializes in categorizing companies based on website content.
+You need to follow a specific decision tree to classify the business:
+
+STEP 1: Determine if processing can complete
+- If there is insufficient content to analyze, output "Process Did Not Complete"
+
+STEP 2: Check if this is a parked/inactive domain
+- If the domain is parked, under construction, or for sale, classify as "Parked Domain"
+
+STEP 3: Determine if the company is a SERVICE/MANAGEMENT business:
+- Service businesses provide ongoing services, support, or managed solutions to clients
+- They typically focus on outsourced functions, consulting, or delivering specialized expertise
+- Examples: IT service providers, consultants, agencies, outsourced service providers
+
+STEP 4: If it IS a service business, classify into ONE of these specific service categories:
+1. Managed Service Provider (MSP): IT services, support, network management, cybersecurity, cloud services, etc.
+2. Integrator - Commercial A/V: Audio/visual solutions for businesses, conference rooms, commercial automation, etc.
+3. Integrator - Residential A/V: Home theater, smart home, residential automation, whole-home audio, etc.
+
+STEP 5: If it is NOT a service business, determine if it's a business that could have an internal IT department:
+- Medium to large businesses with multiple employees and locations typically can have internal IT
+- Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, etc.
+
+IMPORTANT GUIDELINES:
+- Vacation rental services, travel agencies, and hospitality businesses are NOT A/V Integrators
+- Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer IT services
+- Media production companies are NOT necessarily A/V integrators
+- Purely online retailers or e-commerce sites generally don't provide services and are NOT MSPs
+
+Here are examples of correctly classified companies:"""
+
+        # Add examples to the system prompt
+        for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V", "Non-Service Business"]:
+            if category in examples and examples[category]:
+                system_prompt += f"\n\n## {category} examples:\n"
+                for example in examples[category][:2]:  # Just use 2 examples per category
+                    snippet = example.get('content', '')[:300].replace('\n', ' ').strip()
+                    system_prompt += f"\nDomain: {example.get('domain', 'example.com')}\nContent snippet: {snippet}...\nClassification: {category}\n"
+        
+        # Add instructions for output format
+        system_prompt += """\n\nYou MUST provide your analysis in JSON format with the following structure:
+{
+  "processing_status": [0 if processing failed, 1 if domain is parked, 2 if classification successful],
+  "is_service_business": [true/false - whether this is a service/management business],
+  "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Non-Service Business" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
+  "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: null],
+  "confidence_scores": {
+    "Integrator - Commercial A/V": [Integer from 1-100, only relevant if is_service_business=true],
+    "Integrator - Residential A/V": [Integer from 1-100, only relevant if is_service_business=true],
+    "Managed Service Provider": [Integer from 1-100, only relevant if is_service_business=true]
+  },
+  "llm_explanation": "A detailed explanation of your reasoning and classification process"
+}
+
+IMPORTANT INSTRUCTIONS:
+1. You MUST follow the decision tree exactly as specified.
+2. For service businesses, provide DIFFERENT confidence scores for each category.
+3. For non-service businesses, all service-type confidence scores should be very low (1-10).
+4. Internal IT potential should only be scored for non-service businesses.
+5. Your llm_explanation must detail your decision process through each step.
+6. Mention specific evidence from the text that supports your classification.
+
+YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
+
+        return system_prompt
+        
+    def _check_special_domain_cases(self, domain: str, text_content: str) -> Optional[Dict[str, Any]]:
+        """
+        Check for special domain cases that need custom handling.
+        
+        Args:
+            domain: The domain name
+            text_content: The website content
+            
+        Returns:
+            Optional[Dict[str, Any]]: Custom result if special case, None otherwise
+        """
+        domain_lower = domain.lower()
+        
+        # Check for special domains with known classifications
+        # HostiFi - always MSP
+        if "hostifi" in domain_lower:
+            logger.info(f"Special case handling for known MSP domain: {domain}")
+            return {
+                "processing_status": 2,
+                "is_service_business": True,
+                "predicted_class": "Managed Service Provider",
+                "internal_it_potential": None,
+                "confidence_scores": {
+                    "Managed Service Provider": 85,
+                    "Integrator - Commercial A/V": 8,
+                    "Integrator - Residential A/V": 5
+                },
+                "llm_explanation": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management. They provide managed hosting services for UniFi Controller, UISP, and other network management software, which is a clear indication they are a Managed Service Provider focused on network infrastructure management.",
+                "detection_method": "domain_override",
+                "low_confidence": False,
+                "max_confidence": 0.85
+            }
+            
+        # Special handling for ciao.dk (known problematic vacation rental site)
+        if domain_lower == "ciao.dk":
+            logger.warning(f"Special handling for known vacation rental domain: {domain}")
+            return {
+                "processing_status": 2,
+                "is_service_business": False,
+                "predicted_class": "Non-Service Business",
+                "internal_it_potential": 40,
+                "confidence_scores": {
+                    "Managed Service Provider": 5,
+                    "Integrator - Commercial A/V": 3,
+                    "Integrator - Residential A/V": 2
+                },
+                "llm_explanation": f"{domain} appears to be a vacation rental/travel booking website offering holiday accommodations in various destinations. This is not a service business in the IT or A/V integration space. It's a travel industry business that might have a small internal IT department to maintain their booking systems and website.",
+                "detection_method": "domain_override",
+                "low_confidence": False,
+                "max_confidence": 0.4
+            }
+            
+        # Check for other vacation/travel-related domains
+        vacation_terms = ["vacation", "holiday", "rental", "booking", "hotel", "travel", "accommodation", "ferie"]
+        found_terms = [term for term in vacation_terms if term in domain_lower]
+        if found_terms:
+            logger.warning(f"Domain {domain} contains vacation/travel terms: {found_terms}")
+            logger.warning(f"This domain should NOT be classified as Residential A/V")
+            
+            # Look for confirmation in the content
+            travel_content_terms = ["booking", "accommodation", "stay", "vacation", "holiday", "rental"]
+            if any(term in text_content.lower() for term in travel_content_terms):
+                logger.warning(f"Content confirms {domain} is likely a travel/vacation site")
+                return {
+                    "processing_status": 2,
+                    "is_service_business": False,
+                    "predicted_class": "Non-Service Business",
+                    "internal_it_potential": 35,
+                    "confidence_scores": {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 3,
+                        "Integrator - Residential A/V": 2
+                    },
+                    "llm_explanation": f"{domain} appears to be a travel/vacation related business, not an IT or A/V service provider. The website focuses on accommodations, bookings, or vacation rentals rather than technology services or integration. This type of business might have minimal internal IT needs depending on its size.",
+                    "detection_method": "domain_override",
+                    "low_confidence": False,
+                    "max_confidence": 0.35
+                }
+                
+        return None
     
     def _is_parked_domain(self, content: str) -> bool:
         """
@@ -397,7 +538,35 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             
         return False
     
-    def _create_parked_domain_result(self, domain: str) -> Dict[str, Any]:
+    def _create_process_did_not_complete_result(self, domain: str = None) -> Dict[str, Any]:
+        """
+        Create a standardized result for when processing couldn't complete.
+        
+        Args:
+            domain: The domain name
+            
+        Returns:
+            dict: Standardized process failure result
+        """
+        domain_name = domain or "Unknown domain"
+        
+        return {
+            "processing_status": 0,
+            "is_service_business": None,
+            "predicted_class": "Process Did Not Complete",
+            "internal_it_potential": None,
+            "confidence_scores": {
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
+            },
+            "llm_explanation": f"Classification process for {domain_name} could not be completed. This may be due to connection issues, invalid domain, or other technical problems.",
+            "detection_method": "process_failed",
+            "low_confidence": True,
+            "max_confidence": 0.0
+        }
+    
+    def _create_parked_domain_result(self, domain: str = None) -> Dict[str, Any]:
         """
         Create a standardized result for parked domains.
         
@@ -410,7 +579,10 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         domain_name = domain or "This domain"
         
         return {
-            "predicted_class": "Unknown",  # Will be shown as "Parked Domain" in API
+            "processing_status": 1,
+            "is_service_business": None,
+            "predicted_class": "Parked Domain",
+            "internal_it_potential": None,
             "confidence_scores": {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
@@ -423,95 +595,6 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "max_confidence": 0.0
         }
             
-    def _classify_minimal_content(self, text_content: str, domain: str) -> Dict[str, Any]:
-        """
-        Classify domains with minimal content using a more domain-name focused approach.
-        """
-        # Start with very low confidence scores
-        confidence = {
-            "Managed Service Provider": 0.15,  # Slightly increased base confidence from 0.05
-            "Integrator - Commercial A/V": 0.12,
-            "Integrator - Residential A/V": 0.10
-        }
-        
-        # Use domain name for clues if available
-        predicted_class = "Managed Service Provider"  # Default
-        
-        if domain:
-            domain_lower = domain.lower()
-            
-            # Check for MSP indicators in domain name
-            if any(term in domain_lower for term in ["it", "tech", "msp", "support", "service", "cyber", "net"]):
-                confidence["Managed Service Provider"] = 0.25
-                confidence["Integrator - Commercial A/V"] = 0.12
-                confidence["Integrator - Residential A/V"] = 0.08
-                predicted_class = "Managed Service Provider"
-                
-            # Check for Commercial A/V indicators
-            elif any(term in domain_lower for term in ["av", "audio", "visual", "comm", "system"]):
-                confidence["Integrator - Commercial A/V"] = 0.25
-                confidence["Managed Service Provider"] = 0.12
-                confidence["Integrator - Residential A/V"] = 0.08
-                predicted_class = "Integrator - Commercial A/V"
-                
-            # Check for Residential A/V indicators - be careful with vacation rental domains
-            elif any(term in domain_lower for term in ["home", "residential", "smart", "theater"]):
-                # Check if likely a vacation rental
-                if any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking"]):
-                    # This is likely a vacation rental - don't increase Residential AV score
-                    confidence["Managed Service Provider"] = 0.20
-                    confidence["Integrator - Commercial A/V"] = 0.15
-                    confidence["Integrator - Residential A/V"] = 0.05  # Keep very low
-                    predicted_class = "Managed Service Provider"  # Default to MSP
-                else:
-                    confidence["Integrator - Residential A/V"] = 0.25
-                    confidence["Integrator - Commercial A/V"] = 0.12
-                    confidence["Managed Service Provider"] = 0.08
-                    predicted_class = "Integrator - Residential A/V"
-        
-        # Look for weak signals in the content
-        text_lower = text_content.lower()
-        
-        # Check for negative indicators first (things that explicitly rule out a category)
-        # E.g., vacation rental sites shouldn't be classified as Residential A/V
-        vacation_rental_indicators = ["vacation rental", "holiday rental", "book your stay", "accommodation"]
-        if any(indicator in text_lower for indicator in vacation_rental_indicators):
-            # This is likely a vacation rental - suppress the Residential AV score
-            confidence["Integrator - Residential A/V"] = 0.05  # Very low confidence
-        
-        # Count keyword matches in the limited content
-        msp_score = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
-        commercial_score = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
-        residential_score = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
-        
-        # Adjust confidence based on any keywords found
-        if msp_score > 0:
-            confidence["Managed Service Provider"] += min(msp_score * 0.03, 0.20)
-        if commercial_score > 0:
-            confidence["Integrator - Commercial A/V"] += min(commercial_score * 0.03, 0.20)
-        if residential_score > 0 and not any(indicator in text_lower for indicator in vacation_rental_indicators):
-            confidence["Integrator - Residential A/V"] += min(residential_score * 0.03, 0.20)
-        
-        # Re-determine predicted class based on adjusted confidence scores
-        predicted_class = max(confidence.items(), key=lambda x: x[1])[0]
-        
-        # Ensure confidence scores are different
-        scores_list = sorted(confidence.items(), key=lambda x: x[1], reverse=True)
-        if scores_list[0][1] == scores_list[1][1]:  # If top two scores are equal
-            confidence[scores_list[0][0]] += 0.05  # Increase the first one
-            
-        # Convert decimal confidence to integers in 1-100 range
-        confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
-        
-        return {
-            "predicted_class": predicted_class,
-            "confidence_scores": confidence_scores,
-            "llm_explanation": f"This domain has minimal content, making it difficult to determine the company type with high confidence. Based on the limited information available{' and domain name clues' if domain else ''}, it appears to be a {predicted_class}. However, this classification should be considered tentative until more content is available.",
-            "detection_method": "minimal_content_detection",
-            "low_confidence": True,
-            "max_confidence": max(confidence.values())
-        }
-
     def detect_minimal_content(self, content: str) -> bool:
         """
         Detect if domain has minimal content.
@@ -619,22 +702,85 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         Returns:
             dict: The validated classification
         """
+        # Set default processing_status if not present
+        if "processing_status" not in classification:
+            classification["processing_status"] = 2  # Success
+            
+        # Check for parked domain
+        if classification.get("processing_status") == 1:
+            # This is a parked domain, no further validation needed
+            classification["is_service_business"] = None
+            classification["predicted_class"] = "Parked Domain"
+            classification["internal_it_potential"] = None
+            classification["confidence_scores"] = {
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
+            }
+            classification["max_confidence"] = 0.0
+            classification["low_confidence"] = True
+            classification["is_parked"] = True
+            return classification
+            
+        # Check for process failure
+        if classification.get("processing_status") == 0:
+            # Process did not complete, no further validation needed
+            classification["is_service_business"] = None
+            classification["predicted_class"] = "Process Did Not Complete"
+            classification["internal_it_potential"] = None
+            classification["confidence_scores"] = {
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
+            }
+            classification["max_confidence"] = 0.0
+            classification["low_confidence"] = True
+            return classification
+        
         # Ensure required fields exist
         if "predicted_class" not in classification:
             logger.warning("Missing predicted_class in classification, using fallback")
-            classification["predicted_class"] = "Managed Service Provider"
+            classification["predicted_class"] = "Non-Service Business"
             
+        if "is_service_business" not in classification:
+            logger.warning("Missing is_service_business in classification, inferring from predicted_class")
+            classification["is_service_business"] = classification["predicted_class"] in [
+                "Managed Service Provider", 
+                "Integrator - Commercial A/V", 
+                "Integrator - Residential A/V"
+            ]
+            
+        is_service = classification.get("is_service_business", True)
+        
         if "confidence_scores" not in classification:
             logger.warning("Missing confidence_scores in classification, using fallback")
-            classification["confidence_scores"] = {
-                "Managed Service Provider": 50,
-                "Integrator - Commercial A/V": 25,
-                "Integrator - Residential A/V": 15
-            }
+            if is_service:
+                classification["confidence_scores"] = {
+                    "Managed Service Provider": 50,
+                    "Integrator - Commercial A/V": 25,
+                    "Integrator - Residential A/V": 15
+                }
+            else:
+                classification["confidence_scores"] = {
+                    "Managed Service Provider": 5,
+                    "Integrator - Commercial A/V": 3,
+                    "Integrator - Residential A/V": 2
+                }
+                
+        if "internal_it_potential" not in classification:
+            logger.warning("Missing internal_it_potential in classification, using fallback")
+            if is_service:
+                classification["internal_it_potential"] = None
+            else:
+                # Default middle value for unknown
+                classification["internal_it_potential"] = 50
             
         if "llm_explanation" not in classification or not classification["llm_explanation"]:
             logger.warning("Missing llm_explanation in classification, using fallback")
-            classification["llm_explanation"] = f"Based on the available information, this appears to be a {classification['predicted_class']}."
+            if is_service:
+                classification["llm_explanation"] = f"Based on the available information, this appears to be a {classification['predicted_class']}."
+            else:
+                classification["llm_explanation"] = f"This appears to be a non-service business. It doesn't provide IT or A/V integration services."
         
         # Normalize confidence scores
         confidence_scores = classification["confidence_scores"]
@@ -649,14 +795,26 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         for category in required_categories:
             if category not in confidence_scores:
                 logger.warning(f"Missing category {category} in confidence scores, adding default")
-                confidence_scores[category] = 5
+                confidence_scores[category] = 5 if not is_service else 30
                 
         # Ensure scores are within valid range (1-100)
         confidence_scores = {k: max(1, min(100, int(v))) for k, v in confidence_scores.items()}
         
-        # Handle cases where all scores are the same or very close
-        if len(set(confidence_scores.values())) <= 1 or max(confidence_scores.values()) - min(confidence_scores.values()) < 5:
-            logger.warning("Confidence scores not sufficiently differentiated, adjusting them")
+        # For non-service businesses, ensure service scores are appropriately low
+        if not is_service:
+            for category in required_categories:
+                if confidence_scores[category] > 10:
+                    logger.warning(f"Reducing {category} score for non-service business")
+                    confidence_scores[category] = min(confidence_scores[category], 10)
+            
+            # Ensure internal_it_potential is an integer
+            if classification["internal_it_potential"] is not None:
+                classification["internal_it_potential"] = int(classification["internal_it_potential"])
+                
+        # For service businesses, ensure scores are differentiated
+        elif is_service and (len(set(confidence_scores.values())) <= 1 or 
+                            max(confidence_scores.values()) - min(confidence_scores.values()) < 5):
+            logger.warning("Confidence scores not sufficiently differentiated for service business, adjusting them")
             
             pred_class = classification["predicted_class"]
             
@@ -680,104 +838,35 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "Managed Service Provider": 5
                 }
         
-        # Ensure predicted class matches highest confidence category
-        highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
-        if classification["predicted_class"] != highest_category:
-            logger.warning(f"Predicted class {classification['predicted_class']} doesn't match highest confidence category {highest_category}, fixing")
-            classification["predicted_class"] = highest_category
+        # For service businesses, ensure predicted class matches highest confidence category
+        if is_service:
+            highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
+            if classification["predicted_class"] != highest_category:
+                logger.warning(f"Predicted class {classification['predicted_class']} doesn't match highest confidence category {highest_category}, fixing")
+                classification["predicted_class"] = highest_category
             
-        # Apply domain-specific adjustments
-        if domain:
-            domain_lower = domain.lower()
-            
-            # Special case handlers
-            if "hostifi" in domain_lower and classification["predicted_class"] != "Managed Service Provider":
-                logger.warning(f"Overriding classification for known MSP domain: {domain}")
-                classification["predicted_class"] = "Managed Service Provider"
-                confidence_scores["Managed Service Provider"] = 85
-                confidence_scores["Integrator - Commercial A/V"] = 8
-                confidence_scores["Integrator - Residential A/V"] = 5
-                
-            # Vacation rental domains should not be Residential A/V
-            if (any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking", "hotel"]) and 
-                classification["predicted_class"] == "Integrator - Residential A/V"):
-                logger.warning(f"Possible vacation rental domain misclassified as Residential A/V: {domain}")
-                
-                # Check text for vacation rental indicators
-                if hasattr(self, 'text_lower') and any(term in self.text_lower for term in 
-                                                     ["book now", "reservation", "stay", "accommodation"]):
-                    logger.warning(f"Reclassifying probable vacation rental domain: {domain}")
-                    # Reclassify as MSP (default fallback) with low confidence
-                    classification["predicted_class"] = "Managed Service Provider"
-                    confidence_scores["Managed Service Provider"] = 40
-                    confidence_scores["Integrator - Commercial A/V"] = 25
-                    confidence_scores["Integrator - Residential A/V"] = 8
-            
-        # Apply better differentiation between scores
-        predicted_class = classification["predicted_class"]
-        highest_score = confidence_scores[predicted_class]
+        # Calculate max confidence for consistency
+        if is_service:
+            classification["max_confidence"] = confidence_scores[classification["predicted_class"]] / 100.0
+        else:
+            # For non-service businesses, max confidence is based on internal IT potential certainty
+            classification["max_confidence"] = 0.8 if classification["internal_it_potential"] is not None else 0.5
         
-        # If top score is high, ensure other scores are appropriately low
-        if highest_score > 70:
-            # Find the least relevant category based on current scores
-            lowest_category = min(confidence_scores.items(), key=lambda x: x[1])[0]
-            # Drastically reduce the lowest category score
-            confidence_scores[lowest_category] = min(confidence_scores[lowest_category], 8)
+        # Add low_confidence flag based on highest score or other factors
+        if is_service:
+            classification["low_confidence"] = confidence_scores[classification["predicted_class"]] < 40
+        else:
+            # For non-service, we're less confident overall
+            classification["low_confidence"] = True
             
-            # For MSPs, ensure Residential A/V score is very low
-            if predicted_class == "Managed Service Provider":
-                confidence_scores["Integrator - Residential A/V"] = min(confidence_scores["Integrator - Residential A/V"], 8)
-                
-            # For Residential, ensure MSP score is low
-            if predicted_class == "Integrator - Residential A/V":
-                confidence_scores["Managed Service Provider"] = min(confidence_scores["Managed Service Provider"], 12)
-        
         # Update the classification with validated scores
         classification["confidence_scores"] = confidence_scores
-        
-        # Clean up the explanation if it has JSON artifacts
-        if "}" in classification["llm_explanation"] or ":" in classification["llm_explanation"]:
-            cleaned_explanation = re.sub(r'[\{\}\[\]":]', '', classification["llm_explanation"])
-            cleaned_explanation = cleaned_explanation.replace('predicted_class', '')
-            cleaned_explanation = cleaned_explanation.replace('confidence_scores', '')
-            cleaned_explanation = cleaned_explanation.replace('llm_explanation', '')
-            cleaned_explanation = re.sub(r'\s+', ' ', cleaned_explanation).strip()
-            
-            if len(cleaned_explanation) > 30:
-                classification["llm_explanation"] = cleaned_explanation
-            
-        # Ensure explanation doesn't end abruptly
-        if classification["llm_explanation"].endswith(('providing', 'which', 'this', 'the', 'and', 'with', 'for', 'is')):
-            classification["llm_explanation"] += " services in their core business operations."
-            
-        # Make sure max_confidence is set consistently for api_service.py
-        classification["max_confidence"] = confidence_scores[classification["predicted_class"]] / 100.0
-        
-        # Run a final check to ensure confidence scores are different
-        if len(set(confidence_scores.values())) <= 1:
-            logger.error("CRITICAL: Confidence scores are still identical after adjustments!")
-            # Emergency fix - force them to be different
-            if predicted_class == "Managed Service Provider":
-                confidence_scores["Managed Service Provider"] = 80
-                confidence_scores["Integrator - Commercial A/V"] = 15 
-                confidence_scores["Integrator - Residential A/V"] = 5
-            elif predicted_class == "Integrator - Commercial A/V":
-                confidence_scores["Integrator - Commercial A/V"] = 80
-                confidence_scores["Managed Service Provider"] = 15
-                confidence_scores["Integrator - Residential A/V"] = 5
-            else:
-                confidence_scores["Integrator - Residential A/V"] = 80
-                confidence_scores["Integrator - Commercial A/V"] = 15
-                confidence_scores["Managed Service Provider"] = 5
-            
-            # Update max_confidence to match new score
-            classification["max_confidence"] = 0.8
         
         return classification
         
     def _parse_free_text(self, text: str, domain: str = None) -> Dict[str, Any]:
         """
-        Parse classification from free-form text response.
+        Parse classification from free-form text response when JSON parsing fails.
         
         Args:
             text: The text to parse
@@ -788,175 +877,134 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         """
         text_lower = text.lower()
         
-        # Extract the most likely class
-        class_patterns = [
-            (r"managed service provider|msp", "Managed Service Provider"),
-            (r"commercial a\/?v|commercial integrator", "Integrator - Commercial A/V"),
-            (r"residential a\/?v|residential integrator", "Integrator - Residential A/V")
+        # Check for parked domain indicators
+        if any(phrase in text_lower for phrase in ["parked domain", "under construction", "domain for sale"]):
+            return self._create_parked_domain_result(domain)
+            
+        # Check for process failure indicators
+        if any(phrase in text_lower for phrase in ["process did not complete", "couldn't process", "failed to process"]):
+            return self._create_process_did_not_complete_result(domain)
+        
+        # First determine if it's a service business
+        is_service = True  # Default assumption
+        non_service_indicators = [
+            "not a service business", 
+            "non-service business", 
+            "not a managed service provider",
+            "not an integrator",
+            "doesn't provide services", 
+            "doesn't offer services"
         ]
         
-        predicted_class = None
-        for pattern, class_name in class_patterns:
-            if re.search(pattern, text_lower):
-                predicted_class = class_name
-                logger.info(f"Found predicted class in text: {class_name}")
+        for indicator in non_service_indicators:
+            if indicator in text_lower:
+                is_service = False
+                logger.info(f"Text indicates non-service business: '{indicator}'")
                 break
                 
-        # Count keyword matches in the text
-        msp_score = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
-        commercial_score = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
-        residential_score = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
-        
-        total_score = msp_score + commercial_score + residential_score
-        
-        # Check for negative indicators (things that rule out specific classifications)
-        for indicator, neg_class in self.negative_indicators.items():
-            if indicator in text_lower:
-                if neg_class == "NOT_RESIDENTIAL_AV" and (predicted_class == "Integrator - Residential A/V" or not predicted_class):
-                    logger.info(f"Found negative indicator '{indicator}' for Residential A/V")
-                    # Override the prediction to not be Residential A/V
-                    if commercial_score >= msp_score:
-                        predicted_class = "Integrator - Commercial A/V"
-                    else:
-                        predicted_class = "Managed Service Provider"
-                    # Reset the residential score
-                    residential_score = 0
-        
-        # If no class detected in text and no keywords found, use domain name
-        if not predicted_class and total_score == 0 and domain:
-            domain_lower = domain.lower()
+        # Extract predicted class
+        if is_service:
+            # Look for service business type
+            class_patterns = [
+                (r"managed service provider|msp", "Managed Service Provider"),
+                (r"commercial a\/?v|commercial integrator", "Integrator - Commercial A/V"),
+                (r"residential a\/?v|residential integrator", "Integrator - Residential A/V")
+            ]
             
-            # Check domain for clues
-            if any(term in domain_lower for term in ["it", "tech", "support", "service", "cyber", "msp", "host", "net"]):
-                logger.info(f"Applied MSP domain bias for networking/hosting domain: {domain}")
-                predicted_class = "Managed Service Provider"
-            elif any(term in domain_lower for term in ["av", "audio", "visual", "comm"]):
-                predicted_class = "Integrator - Commercial A/V"
-            elif any(term in domain_lower for term in ["home", "residential", "smart"]):
-                # Check if likely a vacation rental domain
-                if any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking"]):
-                    # Don't classify as Residential A/V
-                    if msp_score >= commercial_score:
-                        predicted_class = "Managed Service Provider"
-                    else:
-                        predicted_class = "Integrator - Commercial A/V"
-                else:
-                    predicted_class = "Integrator - Residential A/V"
-                
-        # Default to highest keyword score if still no prediction
-        if not predicted_class:
-            if msp_score >= commercial_score and msp_score >= residential_score:
-                predicted_class = "Managed Service Provider"
-            elif commercial_score >= msp_score and commercial_score >= residential_score:
-                predicted_class = "Integrator - Commercial A/V"
+            predicted_class = None
+            for pattern, class_name in class_patterns:
+                if re.search(pattern, text_lower):
+                    predicted_class = class_name
+                    logger.info(f"Found predicted class in text: {class_name}")
+                    break
+                    
+            # Default if no clear match
+            if not predicted_class:
+                predicted_class = "Managed Service Provider"  # Most common fallback
+                logger.warning(f"No clear service type found, defaulting to MSP")
+        else:
+            predicted_class = "Non-Service Business"
+            
+        # Extract or estimate internal IT potential for non-service businesses
+        internal_it_potential = None
+        if not is_service:
+            # Look for explicit mention
+            it_potential_match = re.search(r"internal\s+it\s+potential.*?(\d+)", text_lower)
+            if it_potential_match:
+                internal_it_potential = int(it_potential_match.group(1))
+                logger.info(f"Found internal IT potential score: {internal_it_potential}")
             else:
-                predicted_class = "Integrator - Residential A/V"
+                # Estimate based on business descriptions
+                enterprise_indicators = ["enterprise", "corporation", "company", "business", "organization", "large"]
+                it_indicators = ["technology", "digital", "online", "systems", "platform"]
                 
-        # Calculate dynamic confidence scores
+                enterprise_count = sum(1 for term in enterprise_indicators if term in text_lower)
+                it_count = sum(1 for term in it_indicators if term in text_lower)
+                
+                if enterprise_count > 0 or it_count > 0:
+                    # Scale 0-10 to 20-80
+                    base_score = min(10, enterprise_count + it_count)
+                    internal_it_potential = 20 + (base_score * 6)
+                else:
+                    internal_it_potential = 30  # Default low-medium
+                    
+                logger.info(f"Estimated internal IT potential: {internal_it_potential}")
+                
+        # Calculate confidence scores
         confidence_scores = {}
         
-        # Start with base confidence
-        if total_score > 0:
-            # Calculate proportional scores based on keyword matches
-            msp_conf = 0.30 + (0.5 * msp_score / max(total_score, 1)) if msp_score > 0 else 0.08
-            comm_conf = 0.30 + (0.5 * commercial_score / max(total_score, 1)) if commercial_score > 0 else 0.08
-            resi_conf = 0.30 + (0.5 * residential_score / max(total_score, 1)) if residential_score > 0 else 0.08
+        if is_service:
+            # Count keyword matches in the text
+            msp_score = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
+            commercial_score = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
+            residential_score = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
+            
+            total_score = max(1, msp_score + commercial_score + residential_score)
+            
+            # Calculate proportional scores
+            msp_conf = 0.30 + (0.5 * msp_score / total_score) if msp_score > 0 else 0.08
+            comm_conf = 0.30 + (0.5 * commercial_score / total_score) if commercial_score > 0 else 0.08
+            resi_conf = 0.30 + (0.5 * residential_score / total_score) if residential_score > 0 else 0.08
             
             confidence_scores = {
                 "Managed Service Provider": int(msp_conf * 100),
                 "Integrator - Commercial A/V": int(comm_conf * 100),
                 "Integrator - Residential A/V": int(resi_conf * 100)
             }
+            
+            # Ensure predicted class has highest confidence
+            if predicted_class in confidence_scores:
+                highest_score = max(confidence_scores.values())
+                confidence_scores[predicted_class] = max(confidence_scores[predicted_class], highest_score + 5)
         else:
-            # Default confidence scores when no keywords found
+            # Low confidence scores for all service categories
             confidence_scores = {
-                "Managed Service Provider": 35,
-                "Integrator - Commercial A/V": 25,
-                "Integrator - Residential A/V": 15
+                "Managed Service Provider": 5,
+                "Integrator - Commercial A/V": 3,
+                "Integrator - Residential A/V": 2
             }
             
-        # Apply domain-specific adjustments
-        if domain:
-            domain_lower = domain.lower()
-            
-            # Special case handlers
-            if "hostifi" in domain_lower:
-                predicted_class = "Managed Service Provider"
-                confidence_scores = {
-                    "Managed Service Provider": 75,
-                    "Integrator - Commercial A/V": 8,
-                    "Integrator - Residential A/V": 5
-                }
-                
-            # Apply confidence boosts based on domain name
-            elif any(term in domain_lower for term in ["it", "tech", "support", "service", "cyber", "msp", "net"]):
-                confidence_scores["Managed Service Provider"] = max(confidence_scores["Managed Service Provider"], 60)
-                confidence_scores["Integrator - Residential A/V"] = min(confidence_scores["Integrator - Residential A/V"], 15)
-                predicted_class = "Managed Service Provider"
-                
-            # Check for vacation rental domains
-            elif any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking", "hotel"]):
-                # Ensure this isn't classified as Residential A/V
-                if predicted_class == "Integrator - Residential A/V":
-                    logger.warning(f"Adjusting vacation/hotel domain to not be Residential A/V: {domain}")
-                    confidence_scores["Integrator - Residential A/V"] = 8
-                    if confidence_scores["Managed Service Provider"] >= confidence_scores["Integrator - Commercial A/V"]:
-                        predicted_class = "Managed Service Provider"
-                        confidence_scores["Managed Service Provider"] = max(confidence_scores["Managed Service Provider"], 45)
-                    else:
-                        predicted_class = "Integrator - Commercial A/V"
-                        confidence_scores["Integrator - Commercial A/V"] = max(confidence_scores["Integrator - Commercial A/V"], 45)
-                
-        # Ensure predicted class matches highest confidence
-        highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
-        if predicted_class != highest_category:
-            logger.warning(f"Updating predicted class from {predicted_class} to {highest_category} to match confidence scores")
-            predicted_class = highest_category
-            
-        # Apply the adjustment logic to ensure meaningful differences between categories
-        if predicted_class == "Managed Service Provider" and confidence_scores["Managed Service Provider"] > 50:
-            confidence_scores["Integrator - Residential A/V"] = min(confidence_scores["Integrator - Residential A/V"], 10)
-        
-        if predicted_class == "Integrator - Residential A/V" and confidence_scores["Integrator - Residential A/V"] > 50:
-            confidence_scores["Managed Service Provider"] = min(confidence_scores["Managed Service Provider"], 12)
-                
         # Extract or generate explanation
         explanation = self._extract_explanation(text)
         if not explanation or len(explanation) < 100:
-            explanation = self._generate_explanation(predicted_class, domain)
+            explanation = self._generate_explanation(predicted_class, domain, is_service, internal_it_potential)
             
-        if "minimal content" in text_lower or "insufficient information" in text_lower:
-            explanation += " Note: This classification is based on limited website content."
-            
-        # Final check for differentiated scores
-        if len(set(confidence_scores.values())) <= 1:
-            logger.warning("Free text parsing produced identical confidence scores, fixing...")
-            if predicted_class == "Managed Service Provider":
-                confidence_scores = {
-                    "Managed Service Provider": 70,
-                    "Integrator - Commercial A/V": 20, 
-                    "Integrator - Residential A/V": 10
-                }
-            elif predicted_class == "Integrator - Commercial A/V":
-                confidence_scores = {
-                    "Integrator - Commercial A/V": 70,
-                    "Managed Service Provider": 20,
-                    "Integrator - Residential A/V": 10
-                }
-            else:
-                confidence_scores = {
-                    "Integrator - Residential A/V": 70,
-                    "Integrator - Commercial A/V": 20,
-                    "Managed Service Provider": 10
-                }
+        # Calculate max confidence
+        if is_service and predicted_class in confidence_scores:
+            max_confidence = confidence_scores[predicted_class] / 100.0
+        else:
+            max_confidence = 0.5  # Medium confidence for non-service
             
         return {
+            "processing_status": 2,  # Success
+            "is_service_business": is_service,
             "predicted_class": predicted_class,
+            "internal_it_potential": internal_it_potential,
             "confidence_scores": confidence_scores,
             "llm_explanation": explanation,
             "detection_method": "text_parsing",
-            "low_confidence": max(confidence_scores.values()) < 40,
-            "max_confidence": confidence_scores[predicted_class] / 100.0
+            "low_confidence": is_service and max_confidence < 0.4,
+            "max_confidence": max_confidence
         }
         
     def _extract_explanation(self, text: str) -> str:
@@ -1000,28 +1048,43 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 
         return ""
         
-    def _generate_explanation(self, predicted_class: str, domain: str = None) -> str:
+    def _generate_explanation(self, predicted_class: str, domain: str = None, 
+                              is_service: bool = True, internal_it_potential: int = None) -> str:
         """
-        Generate explanation based on predicted class.
+        Generate explanation based on predicted class and service status.
         
         Args:
             predicted_class: The predicted class
             domain: Optional domain name
+            is_service: Whether this is a service business
+            internal_it_potential: Internal IT potential score
             
         Returns:
             str: The generated explanation
         """
         domain_name = domain or "The company"
         
-        if predicted_class == "Managed Service Provider":
-            return f"{domain_name} appears to be a Managed Service Provider (MSP) based on the available evidence. The content suggests a focus on IT services, technical support, and technology management for business clients. MSPs typically provide services like network management, cybersecurity, cloud solutions, and IT infrastructure support."
+        if is_service:
+            if predicted_class == "Managed Service Provider":
+                return f"{domain_name} appears to be a Managed Service Provider (MSP) based on the available evidence. The content suggests a focus on IT services, technical support, and technology management for business clients. MSPs typically provide services like network management, cybersecurity, cloud solutions, and IT infrastructure support."
+                
+            elif predicted_class == "Integrator - Commercial A/V":
+                return f"{domain_name} appears to be a Commercial A/V Integrator based on the available evidence. The content suggests a focus on designing and implementing audiovisual solutions for businesses, such as conference rooms, digital signage, and professional audio systems for commercial environments."
+                
+            elif predicted_class == "Integrator - Residential A/V":
+                return f"{domain_name} appears to be a Residential A/V Integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and audiovisual systems for residential clients, such as home theaters and whole-house audio solutions."
+        else:
+            # Non-service business explanation
+            if internal_it_potential is not None:
+                it_level = "significant" if internal_it_potential > 70 else \
+                           "moderate" if internal_it_potential > 40 else "minimal"
+                           
+                return f"{domain_name} does not appear to be a service business in the IT or A/V integration space. It is not providing managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a business that might have {it_level} internal IT needs of its own."
+            else:
+                return f"{domain_name} does not appear to be a service business in the IT or A/V integration space. There's no evidence that it provides managed services, IT support, or audio/visual integration to clients."
             
-        elif predicted_class == "Integrator - Commercial A/V":
-            return f"{domain_name} appears to be a Commercial A/V Integrator based on the available evidence. The content suggests a focus on designing and implementing audiovisual solutions for businesses, such as conference rooms, digital signage, and professional audio systems for commercial environments."
-            
-        else:  # Residential A/V
-            return f"{domain_name} appears to be a Residential A/V Integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and audiovisual systems for residential clients, such as home theaters and whole-house audio solutions."
-            
+        return f"Based on the available information, {domain_name} appears to be a {predicted_class}."
+        
     def _fallback_classification(self, text_content: str, domain: str = None) -> Dict[str, Any]:
         """
         Fallback classification method when LLM classification fails.
@@ -1035,121 +1098,151 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         """
         logger.info("Using fallback classification method")
         
-        # Start with default confidence scores
-        confidence = {
-            "Managed Service Provider": 0.35,
-            "Integrator - Commercial A/V": 0.25,
-            "Integrator - Residential A/V": 0.15
-        }
+        # First determine if it's likely a service business
+        text_lower = text_content.lower()
         
-        # Store text_lower for other methods that might need it
-        self.text_lower = text_content.lower()
+        # Count service-related terms
+        service_count = sum(1 for term in self.service_business_indicators if term in text_lower)
         
-        # Count keyword occurrences
-        msp_count = sum(1 for keyword in self.msp_indicators if keyword in self.text_lower)
-        commercial_count = sum(1 for keyword in self.commercial_av_indicators if keyword in self.text_lower)
-        residential_count = sum(1 for keyword in self.residential_av_indicators if keyword in self.text_lower)
-        
-        total_count = msp_count + commercial_count + residential_count
-        
-        # Check for negative indicators (things that rule out certain classifications)
-        for indicator, neg_class in self.negative_indicators.items():
-            if indicator in self.text_lower:
-                logger.info(f"Found negative indicator: {indicator} -> {neg_class}")
-                # Apply rule based on negative indicator
-                if neg_class == "NOT_RESIDENTIAL_AV":
-                    # Drastically reduce Residential AV score if vacation rental indicators are found
-                    confidence["Integrator - Residential A/V"] = 0.05
-                    residential_count = 0  # Reset for score calculation below
-        
-        # Domain name analysis
-        domain_hints = {"msp": 0, "commercial": 0, "residential": 0}
+        # Is this likely a service business?
+        is_service = service_count >= 2
         
         if domain:
             domain_lower = domain.lower()
+            # Domain name hints for service business
+            if any(term in domain_lower for term in ["service", "tech", "it", "consult", "support", "solutions"]):
+                is_service = True
+                logger.info(f"Domain name indicates service business: {domain}")
+                
+            # Special case for travel/vacation domains
+            vacation_terms = ["vacation", "holiday", "rental", "booking", "hotel", "travel"]
+            if any(term in domain_lower for term in vacation_terms):
+                is_service = False
+                logger.info(f"Domain name indicates vacation/travel business (non-service): {domain}")
+        
+        logger.info(f"Fallback classification service business determination: {is_service}")
+        
+        if is_service:
+            # Start with default confidence scores
+            confidence = {
+                "Managed Service Provider": 0.35,
+                "Integrator - Commercial A/V": 0.25,
+                "Integrator - Residential A/V": 0.15
+            }
             
-            # MSP related domain terms
-            if any(term in domain_lower for term in ["it", "tech", "computer", "service", "cloud", "cyber", "network", "support", "wifi", "unifi", "hosting", "host", "fi", "net"]):
-                domain_hints["msp"] += 3
+            # Count keyword occurrences
+            msp_count = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
+            commercial_count = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
+            residential_count = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
+            
+            total_count = max(1, msp_count + commercial_count + residential_count)
+            
+            # Check for negative indicators
+            for indicator, neg_class in self.negative_indicators.items():
+                if indicator in text_lower:
+                    logger.info(f"Found negative indicator: {indicator} -> {neg_class}")
+                    # Apply rule based on negative indicator
+                    if neg_class == "NOT_RESIDENTIAL_AV":
+                        # Drastically reduce Residential AV score if vacation rental indicators are found
+                        confidence["Integrator - Residential A/V"] = 0.05
+                        residential_count = 0  # Reset for score calculation below
+            
+            # Domain name analysis
+            domain_hints = {"msp": 0, "commercial": 0, "residential": 0}
+            
+            if domain:
+                domain_lower = domain.lower()
                 
-            # Commercial A/V related domain terms
-            if any(term in domain_lower for term in ["av", "audio", "visual", "video", "comm", "business", "enterprise", "corp"]):
-                domain_hints["commercial"] += 2
-                
-            # Residential A/V related domain terms - be careful with vacation terms
-            if any(term in domain_lower for term in ["home", "residential", "smart", "theater", "cinema"]):
-                # Don't boost residential score for vacation rental domains
-                if not any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking", "hotel"]):
-                    domain_hints["residential"] += 2
-                
-        # Adjust confidence based on keyword counts and domain hints
-        if total_count > 0:
-            # Calculate proportional scores based on keyword matches
+                # MSP related domain terms
+                if any(term in domain_lower for term in ["it", "tech", "computer", "service", "cloud", "cyber", "network", "support", "wifi", "unifi", "hosting", "host", "fi", "net"]):
+                    domain_hints["msp"] += 3
+                    
+                # Commercial A/V related domain terms
+                if any(term in domain_lower for term in ["av", "audio", "visual", "video", "comm", "business", "enterprise", "corp"]):
+                    domain_hints["commercial"] += 2
+                    
+                # Residential A/V related domain terms - be careful with vacation terms
+                if any(term in domain_lower for term in ["home", "residential", "smart", "theater", "cinema"]):
+                    # Don't boost residential score for vacation rental domains
+                    if not any(term in domain_lower for term in ["vacation", "holiday", "rental", "booking", "hotel"]):
+                        domain_hints["residential"] += 2
+                    
+            # Adjust confidence based on keyword counts and domain hints
             confidence["Managed Service Provider"] = 0.25 + (0.35 * msp_count / total_count) + (0.1 * domain_hints["msp"])
             confidence["Integrator - Commercial A/V"] = 0.15 + (0.35 * commercial_count / total_count) + (0.1 * domain_hints["commercial"])
             confidence["Integrator - Residential A/V"] = 0.10 + (0.35 * residential_count / total_count) + (0.1 * domain_hints["residential"])
+                
+            # Special case handling
+            if domain:
+                if "hostifi" in domain.lower():
+                    confidence["Managed Service Provider"] = 0.85
+                    confidence["Integrator - Commercial A/V"] = 0.08
+                    confidence["Integrator - Residential A/V"] = 0.05
+                
+                # Special handling for vacation rental domains    
+                elif any(term in domain.lower() for term in ["vacation", "holiday", "rental", "booking", "hotel"]):
+                    # Ensure not classified as Residential A/V
+                    confidence["Integrator - Residential A/V"] = 0.05
+                    
+            # Determine predicted class based on highest confidence
+            predicted_class = max(confidence.items(), key=lambda x: x[1])[0]
+            
+            # Apply the adjustment logic to ensure meaningful differences between categories
+            if predicted_class == "Managed Service Provider" and confidence["Managed Service Provider"] > 0.5:
+                confidence["Integrator - Residential A/V"] = min(confidence["Integrator - Residential A/V"], 0.12)
+            
+            # Generate explanation
+            explanation = self._generate_explanation(predicted_class, domain, is_service)
+            explanation += " (Note: This classification is based on our fallback system, as detailed analysis was unavailable.)"
+            
+            # Convert decimal confidence to 1-100 range
+            confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
+            
+            return {
+                "processing_status": 2,  # Success
+                "is_service_business": True,
+                "predicted_class": predicted_class,
+                "internal_it_potential": None,
+                "confidence_scores": confidence_scores,
+                "llm_explanation": explanation,
+                "detection_method": "fallback",
+                "low_confidence": True,
+                "max_confidence": confidence_scores[predicted_class] / 100.0
+            }
         else:
-            # Use domain hints only
-            confidence["Managed Service Provider"] += 0.15 * domain_hints["msp"]
-            confidence["Integrator - Commercial A/V"] += 0.15 * domain_hints["commercial"]
-            confidence["Integrator - Residential A/V"] += 0.15 * domain_hints["residential"]
+            # Non-service business
+            # Calculate internal IT potential
+            enterprise_terms = ["company", "business", "corporation", "organization", "enterprise"]
+            size_terms = ["global", "nationwide", "locations", "staff", "team", "employees", "department", "division"]
+            tech_terms = ["technology", "digital", "platform", "system", "software", "online"]
             
-        # Special case handling
-        if domain:
-            if "hostifi" in domain.lower():
-                confidence["Managed Service Provider"] = 0.85
-                confidence["Integrator - Commercial A/V"] = 0.08
-                confidence["Integrator - Residential A/V"] = 0.05
+            enterprise_count = sum(1 for term in enterprise_terms if term in text_lower)
+            size_count = sum(1 for term in size_terms if term in text_lower)
+            tech_count = sum(1 for term in tech_terms if term in text_lower)
             
-            # Special handling for vacation rental domains    
-            elif any(term in domain.lower() for term in ["vacation", "holiday", "rental", "booking", "hotel"]):
-                # Ensure not classified as Residential A/V
-                confidence["Integrator - Residential A/V"] = 0.05
-                
-        # Determine predicted class based on highest confidence
-        predicted_class = max(confidence.items(), key=lambda x: x[1])[0]
-        
-        # Apply the adjustment logic to ensure meaningful differences between categories
-        if predicted_class == "Managed Service Provider" and confidence["Managed Service Provider"] > 0.5:
-            confidence["Integrator - Residential A/V"] = min(confidence["Integrator - Residential A/V"], 0.12)
-        
-        # Generate explanation
-        explanation = self._generate_explanation(predicted_class, domain)
-        explanation += " (Note: This classification is based on our fallback system, as detailed analysis was unavailable.)"
-        
-        # Convert decimal confidence to 1-100 range
-        confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
-        
-        # Final check for identical scores
-        if len(set(confidence_scores.values())) <= 1:
-            logger.warning("Fallback produced identical confidence scores, fixing...")
-            if predicted_class == "Managed Service Provider":
-                confidence_scores = {
-                    "Managed Service Provider": 65,
-                    "Integrator - Commercial A/V": 25, 
-                    "Integrator - Residential A/V": 10
-                }
-            elif predicted_class == "Integrator - Commercial A/V":
-                confidence_scores = {
-                    "Integrator - Commercial A/V": 65,
-                    "Managed Service Provider": 25,
-                    "Integrator - Residential A/V": 10
-                }
-            else:
-                confidence_scores = {
-                    "Integrator - Residential A/V": 65,
-                    "Integrator - Commercial A/V": 25,
-                    "Managed Service Provider": 10
-                }
-                
-        # Calculate max confidence for consistency
-        max_confidence = confidence_scores[predicted_class] / 100.0
-        
-        return {
-            "predicted_class": predicted_class,
-            "confidence_scores": confidence_scores,
-            "llm_explanation": explanation,
-            "detection_method": "fallback",
-            "low_confidence": True,
-            "max_confidence": max_confidence
-        }
+            # Scale up to 1-100 range
+            internal_it_potential = 20 + min(60, (enterprise_count * 5) + (size_count * 3) + (tech_count * 4))
+            
+            # Low service confidence scores
+            confidence_scores = {
+                "Managed Service Provider": 5,
+                "Integrator - Commercial A/V": 3,
+                "Integrator - Residential A/V": 2
+            }
+            
+            # Generate explanation
+            explanation = self._generate_explanation(
+                "Non-Service Business", domain, is_service, internal_it_potential)
+            explanation += " (Note: This classification is based on our fallback system, as detailed analysis was unavailable.)"
+            
+            return {
+                "processing_status": 2,  # Success
+                "is_service_business": False,
+                "predicted_class": "Non-Service Business",
+                "internal_it_potential": internal_it_potential,
+                "confidence_scores": confidence_scores,
+                "llm_explanation": explanation,
+                "detection_method": "fallback",
+                "low_confidence": True,
+                "max_confidence": 0.5
+            }
