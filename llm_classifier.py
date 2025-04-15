@@ -65,7 +65,7 @@ class LLMClassifier:
         """
         Classify text content to determine company type.
         
-        Args:a
+        Args:
             text_content: The text content to classify
             domain: Optional domain name for context
             
@@ -841,85 +841,6 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         # Apply the adjustment logic to ensure meaningful differences between categories
         if predicted_class == "Managed Service Provider" and confidence["Managed Service Provider"] > 0.5:
             confidence["Integrator - Residential A/V"] = min(confidence["Integrator - Residential A/V"], 0.12)
-        
-        # Generate explanation
-        explanation = self._generate_explanation(predicted_class, domain)
-        explanation += " (Note: This classification is based on our fallback system, as detailed analysis was unavailable.)"
-        
-        # Convert decimal confidence to 1-100 range
-        confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
-        
-        return {
-            "predicted_class": predicted_class,
-            "confidence_scores": confidence_scores,
-            "llm_explanation": explanation,
-            "detection_method": "fallback",
-            "low_confidence": True
-        }
-        Args:
-            text_content: The text content to classify
-            domain: Optional domain name for context
-            
-        Returns:
-            dict: The classification results
-        """
-        logger.info("Using fallback classification method")
-        
-        # Start with default confidence scores
-        confidence = {
-            "Managed Service Provider": 0.35,
-            "Integrator - Commercial A/V": 0.25,
-            "Integrator - Residential A/V": 0.15
-        }
-        
-        # Count keyword occurrences
-        text_lower = text_content.lower()
-        
-        msp_count = sum(1 for keyword in self.msp_indicators if keyword in text_lower)
-        commercial_count = sum(1 for keyword in self.commercial_av_indicators if keyword in text_lower)
-        residential_count = sum(1 for keyword in self.residential_av_indicators if keyword in text_lower)
-        
-        total_count = msp_count + commercial_count + residential_count
-        
-        # Domain name analysis
-        domain_hints = {"msp": 0, "commercial": 0, "residential": 0}
-        
-        if domain:
-            domain_lower = domain.lower()
-            
-            # MSP related domain terms
-            if any(term in domain_lower for term in ["it", "tech", "computer", "service", "cloud", "cyber", "network", "support", "wifi", "unifi", "hosting", "host", "fi", "net"]):
-                domain_hints["msp"] += 3
-                
-            # Commercial A/V related domain terms
-            if any(term in domain_lower for term in ["av", "audio", "visual", "video", "comm", "business", "enterprise", "corp"]):
-                domain_hints["commercial"] += 2
-                
-            # Residential A/V related domain terms
-            if any(term in domain_lower for term in ["home", "residential", "smart", "theater", "cinema"]):
-                domain_hints["residential"] += 2
-                
-        # Adjust confidence based on keyword counts and domain hints
-        if total_count > 0:
-            # Calculate proportional scores based on keyword matches
-            confidence["Managed Service Provider"] = 0.25 + (0.35 * msp_count / total_count) + (0.1 * domain_hints["msp"])
-            confidence["Integrator - Commercial A/V"] = 0.15 + (0.35 * commercial_count / total_count) + (0.1 * domain_hints["commercial"])
-            confidence["Integrator - Residential A/V"] = 0.10 + (0.35 * residential_count / total_count) + (0.1 * domain_hints["residential"])
-        else:
-            # Use domain hints only
-            confidence["Managed Service Provider"] += 0.15 * domain_hints["msp"]
-            confidence["Integrator - Commercial A/V"] += 0.15 * domain_hints["commercial"]
-            confidence["Integrator - Residential A/V"] += 0.15 * domain_hints["residential"]
-            
-        # Special case handling
-        if domain:
-            if "hostifi" in domain.lower():
-                confidence["Managed Service Provider"] = 0.85
-                confidence["Integrator - Commercial A/V"] = 0.08
-                confidence["Integrator - Residential A/V"] = 0.05
-                
-        # Determine predicted class based on highest confidence
-        predicted_class = max(confidence.items(), key=lambda x: x[1])[0]
         
         # Generate explanation
         explanation = self._generate_explanation(predicted_class, domain)
