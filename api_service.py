@@ -389,6 +389,7 @@ def classify_domain():
         data = request.json
         input_value = data.get('url', '').strip()
         force_reclassify = data.get('force_reclassify', False)
+        use_existing_content = data.get('use_existing_content', False)
         
         if not input_value:
             return jsonify({"error": "URL or email is required"}), 400
@@ -524,8 +525,8 @@ def classify_domain():
         # Try to get content (either from DB or by crawling)
         content = None
         
-        # If reclassifying, try to get existing content first
-        if force_reclassify:
+        # If reclassifying or using existing content, try to get existing content first
+        if force_reclassify or use_existing_content:
             try:
                 content = snowflake_conn.get_domain_content(domain)
                 if content:
@@ -533,12 +534,35 @@ def classify_domain():
             except (AttributeError, Exception) as e:
                 logger.warning(f"Could not get existing content, will crawl instead: {e}")
                 content = None
+
+        # If we specifically requested to use existing content but none was found
+        if use_existing_content and not content:
+            error_result = {
+                "domain": domain,
+                "error": "No existing content found",
+                "predicted_class": "Unknown",
+                "confidence_score": 0,
+                "confidence_scores": {
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0
+                },
+                "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
+                "low_confidence": True,
+                "no_existing_content": True
+            }
+            
+            # Add email to response if input was an email
+            if email:
+                error_result["email"] = email
+                
+            return jsonify(error_result), 404
         
-        # If no content yet, crawl the website
+        # If no content yet and we're not using existing content or existing content wasn't found, crawl the website
         error_type = None
         error_detail = None
         
-        if not content:
+        if not content and not use_existing_content:
             logger.info(f"Crawling website for {domain}")
             content, (error_type, error_detail) = crawl_website(url)
             
@@ -720,7 +744,8 @@ def classify_email():
         # Create a new request with the email as URL
         new_data = {
             'url': email,
-            'force_reclassify': data.get('force_reclassify', False)
+            'force_reclassify': data.get('force_reclassify', False),
+            'use_existing_content': data.get('use_existing_content', False)
         }
         
         # Forward to classify_domain by calling it directly with the new data
