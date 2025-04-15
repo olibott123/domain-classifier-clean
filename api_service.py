@@ -221,10 +221,15 @@ def save_to_snowflake(domain, url, content, classification):
             'llm_explanation': shortened_explanation
         }
         
-        logger.info(f"Saving classification to Snowflake: {domain}, {classification['predicted_class']}")
+        # Special case for parked domains - save as "Parked Domain" if is_parked flag is set
+        company_type = classification.get('predicted_class', 'Unknown')
+        if classification.get('is_parked', False):
+            company_type = "Parked Domain"
+        
+        logger.info(f"Saving classification to Snowflake: {domain}, {company_type}")
         snowflake_conn.save_classification(
             domain=domain,
-            company_type=str(classification['predicted_class']),
+            company_type=str(company_type),
             confidence_score=float(classification['max_confidence']),
             all_scores=json.dumps(classification.get('confidence_scores', {}))[:4000],  # Limit size
             model_metadata=json.dumps(model_metadata)[:4000],  # Limit size
@@ -314,6 +319,9 @@ def classify_domain():
                     # Add low_confidence flag based on confidence score
                     low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
                     
+                    # Check if it's a parked domain (stored as "Parked Domain" in company_type)
+                    is_parked = existing_record.get('company_type') == "Parked Domain"
+                    
                     # Return the cached classification
                     result = {
                         "domain": domain,
@@ -326,7 +334,8 @@ def classify_domain():
                         "explanation": llm_explanation if llm_explanation else 'No explanation available.',
                         "low_confidence": low_confidence,
                         "detection_method": existing_record.get('detection_method', 'api'),
-                        "source": "cached"
+                        "source": "cached",
+                        "is_parked": is_parked
                     }
                     
                     # Add email to response if input was an email
@@ -358,13 +367,15 @@ def classify_domain():
                     "domain": domain,
                     "error": "Failed to crawl website or website has insufficient content",
                     "predicted_class": "Unknown",
-                    "confidence_score": 5,
+                    "confidence_score": 0,  # Changed from 5 to 0 to avoid confusion
                     "confidence_scores": {
-                        "Managed Service Provider": 5,
-                        "Integrator - Commercial A/V": 5,
-                        "Integrator - Residential A/V": 5
+                        "Managed Service Provider": 0,
+                        "Integrator - Commercial A/V": 0,
+                        "Integrator - Residential A/V": 0
                     },
-                    "low_confidence": True
+                    "explanation": f"We were unable to retrieve content from {domain}. This could be due to a server timeout, SSL certificate issues, or the website being unavailable. Without analyzing the website content, we cannot determine the company type.",
+                    "low_confidence": True,
+                    "is_crawl_error": True  # Added to distinguish crawl errors
                 }
                 
                 # Add email to error response if input was an email
@@ -379,12 +390,13 @@ def classify_domain():
                 "domain": domain, 
                 "error": "LLM classifier is not available",
                 "predicted_class": "Unknown",
-                "confidence_score": 5,
+                "confidence_score": 0,  # Changed from 5 to 0
                 "confidence_scores": {
-                    "Managed Service Provider": 5,
-                    "Integrator - Commercial A/V": 5,
-                    "Integrator - Residential A/V": 5
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0
                 },
+                "explanation": "Our classification system is temporarily unavailable. Please try again later. This issue has been logged and will be addressed by our technical team.",
                 "low_confidence": True
             }
             
@@ -402,12 +414,13 @@ def classify_domain():
                 "domain": domain,
                 "error": "Classification failed",
                 "predicted_class": "Unknown",
-                "confidence_score": 5,
+                "confidence_score": 0,  # Changed from 5 to 0
                 "confidence_scores": {
-                    "Managed Service Provider": 5,
-                    "Integrator - Commercial A/V": 5,
-                    "Integrator - Residential A/V": 5
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0
                 },
+                "explanation": f"We encountered an issue while analyzing {domain}. Although content was retrieved from the website, our classification system was unable to process it properly. This could be due to unusual formatting or temporary system limitations.",
                 "low_confidence": True
             }
             
@@ -417,12 +430,25 @@ def classify_domain():
                 
             return jsonify(error_result), 500
         
-        # Ensure predicted_class matches highest confidence score
-        if "confidence_scores" in classification:
+        # Ensure predicted_class matches highest confidence score if not a parked domain
+        if "confidence_scores" in classification and not classification.get('is_parked', False):
             confidence_scores = classification["confidence_scores"]
             if confidence_scores:
-                max_class = max(confidence_scores.items(), key=lambda x: x[1])
-                classification["predicted_class"] = max_class[0]
+                # Convert scores to numbers if they are strings
+                numeric_scores = {}
+                for key, value in confidence_scores.items():
+                    try:
+                        numeric_scores[key] = float(value) if isinstance(value, str) else value
+                    except (ValueError, TypeError):
+                        numeric_scores[key] = 0
+                
+                max_class = max(numeric_scores.items(), key=lambda x: x[1])
+                
+                # Double-check if predicted class doesn't match highest score
+                if classification["predicted_class"] != max_class[0]:
+                    logger.warning(f"Correcting mismatched prediction: {classification['predicted_class']} to {max_class[0]}")
+                    classification["predicted_class"] = max_class[0]
+                    
                 classification["max_confidence"] = max_class[1]
         
         # Set low_confidence flag based on threshold
@@ -431,20 +457,41 @@ def classify_domain():
         # Save to Snowflake (always save, even for reclassifications)
         save_to_snowflake(domain, url, content, classification)
         
-        # Create the response with converted confidence scores to integers (1-100)
-        result = {
-            "domain": domain,
-            "predicted_class": classification.get('predicted_class'),
-            "confidence_score": int(classification.get('max_confidence', 0.05) * 100),
-            "confidence_scores": {
-                category: int(score * 100) 
-                for category, score in classification.get('confidence_scores', {}).items()
-            },
-            "explanation": classification.get('llm_explanation', 'No explanation available.'),
-            "low_confidence": classification.get('low_confidence', False),
-            "detection_method": classification.get('detection_method', 'api'),
-            "source": "fresh"
-        }
+        # Create the response
+        if classification.get("is_parked", False):
+            # Special case for parked domains
+            result = {
+                "domain": domain,
+                "predicted_class": "Parked Domain",  # Clear indicator in the UI
+                "confidence_score": 0,  # Zero confidence rather than 5%
+                "confidence_scores": {
+                    category: int(score * 100) if not isinstance(score, str) else int(float(score) * 100)
+                    for category, score in classification.get('confidence_scores', {}).items()
+                },
+                "explanation": classification.get('llm_explanation', 'This appears to be a parked or inactive domain without business-specific content.'),
+                "low_confidence": True,
+                "detection_method": classification.get('detection_method', 'parked_domain_detection'),
+                "source": "fresh",
+                "is_parked": True
+            }
+        else:
+            # Normal case with confidence scores as integers (1-100)
+            result = {
+                "domain": domain,
+                "predicted_class": classification.get('predicted_class'),
+                "confidence_score": int(classification.get('max_confidence', 0.05) * 100) 
+                    if not isinstance(classification.get('max_confidence', 0.05), str) 
+                    else int(float(classification.get('max_confidence', 0.05)) * 100),
+                "confidence_scores": {
+                    category: int(score * 100) if not isinstance(score, str) else int(float(score) * 100)
+                    for category, score in classification.get('confidence_scores', {}).items()
+                },
+                "explanation": classification.get('llm_explanation', 'No explanation available.'),
+                "low_confidence": classification.get('low_confidence', False),
+                "detection_method": classification.get('detection_method', 'api'),
+                "source": "fresh",
+                "is_parked": False
+            }
         
         # Add email to response if input was an email
         if email:
@@ -457,12 +504,13 @@ def classify_domain():
         return jsonify({
             "error": str(e),
             "predicted_class": "Error",
-            "confidence_score": 5,
+            "confidence_score": 0,  # Changed from 5 to 0
             "confidence_scores": {
-                "Managed Service Provider": 5,
-                "Integrator - Commercial A/V": 5,
-                "Integrator - Residential A/V": 5
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
             },
+            "explanation": f"An unexpected error occurred while processing your request: {str(e)}",
             "low_confidence": True
         }), 500
 
@@ -519,12 +567,13 @@ def classify_email():
         return jsonify({
             "error": str(e),
             "predicted_class": "Error",
-            "confidence_score": 5,
+            "confidence_score": 0,  # Changed from 5 to 0
             "confidence_scores": {
-                "Managed Service Provider": 5,
-                "Integrator - Commercial A/V": 5,
-                "Integrator - Residential A/V": 5
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
             },
+            "explanation": f"An unexpected error occurred while processing your email classification request: {str(e)}",
             "low_confidence": True
         }), 500
 
