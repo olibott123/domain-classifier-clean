@@ -379,6 +379,58 @@ def create_error_result(domain, error_type=None, error_detail=None, email=None):
     error_result["explanation"] = explanation
     return error_result
 
+def validate_result_consistency(result, domain):
+    """
+    Validate and ensure consistency between predicted_class, confidence scores, and explanation.
+    
+    Args:
+        result (dict): The classification result
+        domain (str): The domain being processed
+        
+    Returns:
+        dict: The validated and consistent result
+    """
+    if not result:
+        return result
+        
+    # First, ensure predicted_class is never null
+    if result.get("predicted_class") is None:
+        # Extract a class from the explanation if possible
+        explanation = result.get("explanation", "")
+        if "non-service business" in explanation.lower():
+            result["predicted_class"] = "Non-Service Business"
+        elif "vacation rental" in explanation.lower() or "travel" in explanation.lower():
+            result["predicted_class"] = "Non-Service Business"
+        elif "parked domain" in explanation.lower():
+            result["predicted_class"] = "Parked Domain"
+        else:
+            # Default to Unknown
+            result["predicted_class"] = "Unknown"
+        logger.warning(f"Fixed null predicted_class for {domain} to {result['predicted_class']}")
+    
+    # Check for cases where confidence score is very low for service businesses
+    if "confidence_score" in result and result["confidence_score"] <= 15:
+        explanation = result.get("explanation", "").lower()
+        if "non-service business" in explanation or "not a service" in explanation:
+            if result["predicted_class"] in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                # If explanation mentions non-service but class is a service type, fix it
+                logger.warning(f"Correcting predicted_class from {result['predicted_class']} to Non-Service Business based on explanation")
+                result["predicted_class"] = "Non-Service Business"
+                
+    # Ensure explanation is consistent with predicted_class
+    if result.get("explanation") and "based on" in result["explanation"].lower():
+        explanation = result["explanation"]
+        # If explanation mentions company was "previously classified as a None"
+        if "previously classified as a None" in explanation:
+            # Fix this wording
+            explanation = explanation.replace(
+                f"previously classified as a None", 
+                f"previously classified as a {result.get('predicted_class', 'company')}"
+            )
+            result["explanation"] = explanation
+    
+    return result
+
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
     """Direct API that classifies a domain or email and returns the result"""
@@ -530,6 +582,9 @@ def classify_domain():
                     # Add email to response if input was an email
                     if email:
                         result["email"] = email
+                    
+                    # Ensure result consistency
+                    result = validate_result_consistency(result, domain)
                     
                     # Log the response for debugging
                     logger.info(f"Sending response to client: {json.dumps(result)}")
@@ -720,6 +775,12 @@ def classify_domain():
             if not explanation:
                 explanation = f"Based on analysis of website content, {domain} has been classified as a {classification.get('predicted_class')}."
                 
+            # Check for Non-Service Business in the explanation 
+            if "non-service business" in explanation.lower() and classification.get('predicted_class') in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                if max_confidence <= 20:  # Only override if confidence is low
+                    logger.info(f"Correcting classification for {domain} to Non-Service Business based on explanation")
+                    classification['predicted_class'] = "Non-Service Business"
+                
             result = {
                 "domain": domain,
                 "predicted_class": classification.get('predicted_class'),
@@ -736,6 +797,9 @@ def classify_domain():
         if email:
             result["email"] = email
             
+        # Ensure result consistency
+        result = validate_result_consistency(result, domain)
+        
         # Log the response for debugging
         logger.info(f"Sending response to client: {json.dumps(result)}")
         
