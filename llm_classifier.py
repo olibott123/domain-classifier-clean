@@ -379,6 +379,7 @@ IMPORTANT GUIDELINES:
 - Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer IT services
 - Media production companies are NOT necessarily A/V integrators
 - Purely online retailers or e-commerce sites generally don't provide services and are NOT MSPs
+- Transportation and logistics companies are NOT service providers in the IT sense and should be classified as Non-Service Business
 
 Here are examples of correctly classified companies:"""
 
@@ -412,6 +413,7 @@ IMPORTANT INSTRUCTIONS:
 4. Internal IT potential should only be scored for non-service businesses.
 5. Your llm_explanation must detail your decision process through each step.
 6. Mention specific evidence from the text that supports your classification.
+7. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as a Non-Service Business, not as an MSP.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
 
@@ -496,6 +498,31 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "max_confidence": 0.35
                 }
                 
+        # Check for transportation/logistics companies
+        transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery", "carrier"]
+        found_transport_terms = [term for term in transport_terms if term in domain_lower]
+        if found_transport_terms:
+            logger.warning(f"Domain {domain} contains transportation terms: {found_transport_terms}")
+            # Look for confirmation in the content
+            transport_content_terms = ["shipping", "logistics", "fleet", "trucking", "transportation", "delivery"]
+            if any(term in text_content.lower() for term in transport_content_terms):
+                logger.warning(f"Content confirms {domain} is likely a transportation/logistics company")
+                return {
+                    "processing_status": 2,
+                    "is_service_business": False,
+                    "predicted_class": "Non-Service Business",
+                    "internal_it_potential": 60,
+                    "confidence_scores": {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 3,
+                        "Integrator - Residential A/V": 2
+                    },
+                    "llm_explanation": f"{domain} appears to be a transportation and logistics company, not an IT or A/V service provider. The website focuses on shipping, transportation, and logistics services rather than technology services or integration. This type of company typically has moderate internal IT needs to manage their operations and fleet management systems.",
+                    "detection_method": "domain_override",
+                    "low_confidence": False,
+                    "max_confidence": 0.6
+                }
+                
         return None
     
     def _is_parked_domain(self, content: str) -> bool:
@@ -553,7 +580,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         return {
             "processing_status": 0,
             "is_service_business": None,
-            "predicted_class": "Process Did Not Complete",
+            "predicted_class": "Process Did Not Complete",  # Always ensure a valid string
             "internal_it_potential": None,
             "confidence_scores": {
                 "Managed Service Provider": 0,
@@ -581,7 +608,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         return {
             "processing_status": 1,
             "is_service_business": None,
-            "predicted_class": "Parked Domain",
+            "predicted_class": "Parked Domain",  # Always a valid string
             "internal_it_potential": None,
             "confidence_scores": {
                 "Managed Service Provider": 0,
@@ -738,9 +765,21 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             return classification
         
         # Ensure required fields exist
-        if "predicted_class" not in classification:
-            logger.warning("Missing predicted_class in classification, using fallback")
-            classification["predicted_class"] = "Non-Service Business"
+        if "predicted_class" not in classification or classification["predicted_class"] is None:
+            logger.warning("Missing or null predicted_class in classification, using fallback")
+            
+            # Check explanation for clues about what type of business this is
+            explanation = classification.get("llm_explanation", "").lower()
+            if "non-service business" in explanation or "not a service" in explanation:
+                classification["predicted_class"] = "Non-Service Business"
+            elif "travel" in explanation or "vacation" in explanation or "rental" in explanation:
+                classification["predicted_class"] = "Non-Service Business"
+            elif "transport" in explanation or "logistics" in explanation or "shipping" in explanation:
+                classification["predicted_class"] = "Non-Service Business"
+            else:
+                classification["predicted_class"] = "Unknown"
+            
+            logger.info(f"Fixed null predicted_class to '{classification['predicted_class']}' based on explanation")
             
         if "is_service_business" not in classification:
             logger.warning("Missing is_service_business in classification, inferring from predicted_class")
@@ -751,6 +790,26 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             ]
             
         is_service = classification.get("is_service_business", True)
+        
+        # Check for very low confidence service business classifications
+        if is_service and "confidence_scores" in classification:
+            # Get highest confidence score
+            highest_score = max(classification["confidence_scores"].values())
+            if highest_score <= 15:
+                # This is likely not actually a service business
+                logger.warning(f"Very low confidence ({highest_score}) for service classification, recategorizing as Non-Service Business")
+                classification["is_service_business"] = False
+                classification["predicted_class"] = "Non-Service Business"
+                is_service = False
+                
+                # Set appropriate internal IT potential
+                if "llm_explanation" in classification:
+                    # Extract potential internal IT score from explanation
+                    it_match = re.search(r'internal IT.*?(\d+)[/\s]*100', classification["llm_explanation"])
+                    if it_match:
+                        classification["internal_it_potential"] = int(it_match.group(1))
+                    else:
+                        classification["internal_it_potential"] = 50  # Default medium value
         
         if "confidence_scores" not in classification:
             logger.warning("Missing confidence_scores in classification, using fallback")
@@ -893,7 +952,9 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "not a managed service provider",
             "not an integrator",
             "doesn't provide services", 
-            "doesn't offer services"
+            "doesn't offer services",
+            "transportation", "logistics", "shipping", "trucking",
+            "vacation rental", "travel agency", "hotel", "accommodation"
         ]
         
         for indicator in non_service_indicators:
@@ -1119,6 +1180,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             if any(term in domain_lower for term in vacation_terms):
                 is_service = False
                 logger.info(f"Domain name indicates vacation/travel business (non-service): {domain}")
+                
+            # Special case for transportation/logistics
+            transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery"]
+            if any(term in domain_lower for term in transport_terms):
+                is_service = False
+                logger.info(f"Domain name indicates transportation/logistics business (non-service): {domain}")
         
         logger.info(f"Fallback classification service business determination: {is_service}")
         
@@ -1146,6 +1213,14 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                         # Drastically reduce Residential AV score if vacation rental indicators are found
                         confidence["Integrator - Residential A/V"] = 0.05
                         residential_count = 0  # Reset for score calculation below
+                    elif neg_class == "NOT_MSP":
+                        # Reduce MSP score for e-commerce indicators
+                        confidence["Managed Service Provider"] = 0.05
+                        msp_count = 0
+                    elif neg_class == "NOT_SERVICE":
+                        # If strong indicator of non-service, override the classification
+                        logger.info(f"Found strong non-service indicator: {indicator}")
+                        return self._create_non_service_result(domain, text_content)
             
             # Domain name analysis
             domain_hints = {"msp": 0, "commercial": 0, "residential": 0}
@@ -1184,6 +1259,17 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     # Ensure not classified as Residential A/V
                     confidence["Integrator - Residential A/V"] = 0.05
                     
+                # Special handling for transport/logistics domains
+                elif any(term in domain.lower() for term in ["trucking", "transport", "logistics"]):
+                    # This should not be a service business at all
+                    return self._create_non_service_result(domain, text_content)
+                    
+            # Additional content checks for non-service businesses
+            if "transport" in text_lower or "logistics" in text_lower or "shipping" in text_lower or "trucking" in text_lower:
+                # This is likely a transportation/logistics company, not a service provider
+                logger.info("Content suggests transportation/logistics business, reclassifying as non-service")
+                return self._create_non_service_result(domain, text_content)
+                
             # Determine predicted class based on highest confidence
             predicted_class = max(confidence.items(), key=lambda x: x[1])[0]
             
@@ -1210,39 +1296,170 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "max_confidence": confidence_scores[predicted_class] / 100.0
             }
         else:
-            # Non-service business
-            # Calculate internal IT potential
-            enterprise_terms = ["company", "business", "corporation", "organization", "enterprise"]
-            size_terms = ["global", "nationwide", "locations", "staff", "team", "employees", "department", "division"]
-            tech_terms = ["technology", "digital", "platform", "system", "software", "online"]
+            return self._create_non_service_result(domain, text_content)
+    
+    def _create_non_service_result(self, domain: str, text_content: str) -> Dict[str, Any]:
+        """
+        Create a standardized result for non-service businesses.
+        
+        Args:
+            domain: The domain name
+            text_content: The text content to analyze
             
-            enterprise_count = sum(1 for term in enterprise_terms if term in text_lower)
-            size_count = sum(1 for term in size_terms if term in text_lower)
-            tech_count = sum(1 for term in tech_terms if term in text_lower)
+        Returns:
+            dict: Standardized non-service business result
+        """
+        # Calculate internal IT potential
+        text_lower = text_content.lower()
+        enterprise_terms = ["company", "business", "corporation", "organization", "enterprise"]
+        size_terms = ["global", "nationwide", "locations", "staff", "team", "employees", "department", "division"]
+        tech_terms = ["technology", "digital", "platform", "system", "software", "online"]
+        
+        enterprise_count = sum(1 for term in enterprise_terms if term in text_lower)
+        size_count = sum(1 for term in size_terms if term in text_lower)
+        tech_count = sum(1 for term in tech_terms if term in text_lower)
+        
+        # Scale up to 1-100 range
+        internal_it_potential = 20 + min(60, (enterprise_count * 5) + (size_count * 3) + (tech_count * 4))
+        
+        # Higher IT potential for transportation companies
+        if "transport" in text_lower or "logistics" in text_lower or "trucking" in text_lower or "shipping" in text_lower:
+            internal_it_potential = max(internal_it_potential, 55)  # Transport companies usually need IT
+            logger.info(f"Adjusted internal IT potential for transportation company: {internal_it_potential}")
+        
+        # Higher potential for financial services
+        if "bank" in text_lower or "finance" in text_lower or "financial" in text_lower or "insurance" in text_lower:
+            internal_it_potential = max(internal_it_potential, 70)  # Financial companies need significant IT
+            logger.info(f"Adjusted internal IT potential for financial company: {internal_it_potential}")
             
-            # Scale up to 1-100 range
-            internal_it_potential = 20 + min(60, (enterprise_count * 5) + (size_count * 3) + (tech_count * 4))
+        # Lower potential for very small businesses
+        if "small" in text_lower and "business" in text_lower:
+            internal_it_potential = min(internal_it_potential, 40)
+            logger.info(f"Adjusted internal IT potential for small business: {internal_it_potential}")
             
-            # Low service confidence scores
-            confidence_scores = {
+        # Generate an appropriate explanation
+        if "transport" in text_lower or "logistics" in text_lower or "trucking" in text_lower:
+            explanation = f"{domain or 'This company'} appears to be a transportation and logistics service provider, not a service/management business or an A/V integrator. The company focuses on physical transportation, shipping, or logistics rather than providing IT or A/V services to clients. This type of company typically has moderate to significant internal IT needs to manage their operations, logistics systems, and fleet management."
+        elif "vacation" in text_lower or "hotel" in text_lower or "accommodation" in text_lower or "booking" in text_lower:
+            explanation = f"{domain or 'This company'} appears to be in the travel, tourism, or hospitality industry, not an IT service provider or A/V integrator. The company focuses on providing accommodations, vacation rentals, or travel-related services rather than IT or A/V services. This type of business typically has low to moderate internal IT needs to maintain booking systems and websites."
+        elif "retail" in text_lower or "shop" in text_lower or "store" in text_lower or "product" in text_lower:
+            explanation = f"{domain or 'This company'} appears to be a retail or e-commerce business, not an IT service provider or A/V integrator. The company sells products rather than providing IT or A/V services to clients. This type of business typically has varying levels of internal IT needs depending on their size and online presence."
+        else:
+            explanation = f"{domain or 'This company'} does not appear to be a service business in the IT or A/V integration space. There is no evidence that it provides managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a company that might have its own internal IT needs (estimated potential: {internal_it_potential}/100)."
+            
+        # Create non-service business result with minimal confidence scores for service categories
+        return {
+            "processing_status": 2,  # Success
+            "is_service_business": False,
+            "predicted_class": "Non-Service Business",
+            "internal_it_potential": internal_it_potential,
+            "confidence_scores": {
                 "Managed Service Provider": 5,
                 "Integrator - Commercial A/V": 3,
                 "Integrator - Residential A/V": 2
-            }
+            },
+            "llm_explanation": explanation,
+            "detection_method": "non_service_detection",
+            "low_confidence": True,
+            "max_confidence": 0.8  # Reasonably confident in non-service classification
+        }
+        
+    def check_confidence_alignment(self, classification: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Check if the confidence scores align with the predicted class.
+        
+        Args:
+            classification: The classification to check
             
-            # Generate explanation
-            explanation = self._generate_explanation(
-                "Non-Service Business", domain, is_service, internal_it_potential)
-            explanation += " (Note: This classification is based on our fallback system, as detailed analysis was unavailable.)"
+        Returns:
+            dict: The updated classification with aligned scores
+        """
+        # Only relevant for service businesses
+        if not classification.get("is_service_business", False):
+            return classification
             
-            return {
-                "processing_status": 2,  # Success
-                "is_service_business": False,
-                "predicted_class": "Non-Service Business",
-                "internal_it_potential": internal_it_potential,
-                "confidence_scores": confidence_scores,
-                "llm_explanation": explanation,
-                "detection_method": "fallback",
-                "low_confidence": True,
-                "max_confidence": 0.5
-            }
+        if "confidence_scores" not in classification or "predicted_class" not in classification:
+            return classification
+            
+        confidence_scores = classification["confidence_scores"]
+        predicted_class = classification["predicted_class"]
+        
+        # Make sure predicted class has the highest score
+        if predicted_class in confidence_scores:
+            highest_score = max(confidence_scores.values())
+            highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
+            
+            if highest_category != predicted_class:
+                logger.warning(f"Predicted class {predicted_class} doesn't match highest confidence {highest_category}, adjusting")
+                # Find current score of predicted class
+                current_score = confidence_scores[predicted_class]
+                # Boost it above the highest
+                confidence_scores[predicted_class] = highest_score + 5
+                
+        # Make sure scores are differentiated
+        score_values = list(confidence_scores.values())
+        if len(set(score_values)) <= 1 or max(score_values) - min(score_values) < 5:
+            logger.warning("Confidence scores not differentiated enough, adjusting")
+            
+            # Set up differentiated scores
+            if predicted_class == "Managed Service Provider":
+                confidence_scores = {
+                    "Managed Service Provider": 80,
+                    "Integrator - Commercial A/V": 15,
+                    "Integrator - Residential A/V": 5
+                }
+            elif predicted_class == "Integrator - Commercial A/V":
+                confidence_scores = {
+                    "Integrator - Commercial A/V": 80,
+                    "Managed Service Provider": 15,
+                    "Integrator - Residential A/V": 5
+                }
+            else:  # Residential A/V
+                confidence_scores = {
+                    "Integrator - Residential A/V": 80,
+                    "Integrator - Commercial A/V": 15,
+                    "Managed Service Provider": 5
+                }
+                
+        # Update classification
+        classification["confidence_scores"] = confidence_scores
+        return classification
+    
+    def process_domain(self, domain: str, content: str = None) -> Dict[str, Any]:
+        """
+        Comprehensive domain processing pipeline.
+        
+        Args:
+            domain: The domain to process
+            content: Optional pre-fetched content
+            
+        Returns:
+            dict: The processed classification result
+        """
+        logger.info(f"Processing domain: {domain}")
+        
+        if not content:
+            logger.warning(f"No content provided for {domain}")
+            return self._create_process_did_not_complete_result(domain)
+            
+        # Check for special domain cases first
+        special_result = self._check_special_domain_cases(domain, content)
+        if special_result:
+            logger.info(f"Using special case handling for {domain}")
+            return special_result
+            
+        # Normal classification pipeline
+        result = self.classify(content, domain)
+        
+        # Ensure confidence scores are aligned and differentiated
+        result = self.check_confidence_alignment(result)
+        
+        # Set low confidence flag if appropriate
+        max_confidence = result.get("max_confidence", 0.5)
+        if result.get("is_service_business", False):
+            result["low_confidence"] = max_confidence < 0.4
+        else:
+            result["low_confidence"] = max_confidence < 0.6
+            
+        logger.info(f"Completed processing for {domain}: {result['predicted_class']}")
+        return result
