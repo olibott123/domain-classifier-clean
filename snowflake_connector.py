@@ -131,7 +131,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
-            # Look for classifications not older than 30 days
+            # Look for classifications not older than 30 days and include LLM_EXPLANATION field
             query = """
                 SELECT
                     DOMAIN,
@@ -141,7 +141,8 @@ class SnowflakeConnector:
                     LOW_CONFIDENCE,
                     DETECTION_METHOD,
                     MODEL_METADATA,
-                    CLASSIFICATION_DATE
+                    CLASSIFICATION_DATE,
+                    LLM_EXPLANATION
                 FROM DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
                 AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
@@ -152,10 +153,10 @@ class SnowflakeConnector:
             
             result = cursor.fetchone()
             if result:
-                column_names = ["domain", "company_type", "confidence_score", "all_scores", 
-                                "low_confidence", "detection_method", "model_metadata", "classification_date"]
+                # Get column names from cursor description
+                column_names = [col[0] for col in cursor.description]
                 existing_record = dict(zip(column_names, result))
-                logger.info(f"Found existing classification for {domain}: {existing_record['company_type']}")
+                logger.info(f"Found existing classification for {domain}: {existing_record['COMPANY_TYPE']}")
                 return existing_record
             
             logger.info(f"No existing classification found for {domain}")
@@ -241,8 +242,8 @@ class SnowflakeConnector:
             if conn:
                 conn.close()
     
-    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method):
-        """Save domain classification to Snowflake."""
+    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, llm_explanation=None):
+        """Save domain classification to Snowflake with explanation."""
         if not self.connected:
             logger.info(f"Fallback: Not saving classification for {domain}")
             return True, None
@@ -254,12 +255,35 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Insert new record - using the table structure with ID autoincrement
-            cursor.execute("""
+            # Insert new record - including LLM_EXPLANATION field
+            query = """
                 INSERT INTO DOMAIN_CLASSIFICATION 
-                (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classification_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP())
-            """, (domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method))
+                (domain, company_type, confidence_score, all_scores, model_metadata, 
+                low_confidence, detection_method, classification_date, llm_explanation)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+            """
+            
+            # Ensure explanation isn't too long
+            if llm_explanation and len(llm_explanation) > 5000:
+                # Truncate at a sentence boundary
+                last_period = llm_explanation[:4900].rfind('.')
+                if last_period > 0:
+                    llm_explanation = llm_explanation[:last_period+1]
+                else:
+                    llm_explanation = llm_explanation[:4900] + "..."
+            
+            params = (
+                domain, 
+                company_type, 
+                confidence_score, 
+                all_scores, 
+                model_metadata, 
+                low_confidence, 
+                detection_method,
+                llm_explanation  # Include explanation as a parameter
+            )
+            
+            cursor.execute(query, params)
             
             conn.commit()
             logger.info(f"Saved classification for {domain}: {company_type}")
