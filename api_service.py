@@ -10,6 +10,7 @@ import os
 import numpy as np
 import logging
 import traceback
+import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -101,8 +102,54 @@ def extract_domain_from_email(email):
         logger.error(f"Error extracting domain from email: {e}")
         return None
 
+def detect_error_type(error_message):
+    """
+    Analyze error message to determine the specific type of error.
+    
+    Args:
+        error_message (str): The error message string
+        
+    Returns:
+        tuple: (error_type, detailed_message)
+    """
+    error_message = str(error_message).lower()
+    
+    # SSL Certificate errors
+    if any(phrase in error_message for phrase in ['certificate has expired', 'certificate verify failed', 'ssl', 'cert']):
+        if 'expired' in error_message:
+            return "ssl_expired", "The website's SSL certificate has expired."
+        elif 'verify failed' in error_message:
+            return "ssl_invalid", "The website has an invalid SSL certificate."
+        else:
+            return "ssl_error", "The website has SSL certificate issues."
+    
+    # DNS resolution errors
+    elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host']):
+        return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
+    
+    # Connection errors
+    elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error']):
+        return "connection_error", "Could not establish a connection to the website. It may be down or blocking our requests."
+    
+    # 4XX HTTP errors
+    elif any(phrase in error_message for phrase in ['403', 'forbidden', '401', 'unauthorized']):
+        return "access_denied", "Access to the website was denied. The site may be blocking automated access."
+    elif '404' in error_message or 'not found' in error_message:
+        return "not_found", "The requested page was not found on this website."
+    
+    # 5XX HTTP errors
+    elif any(phrase in error_message for phrase in ['500', '502', '503', '504', 'server error']):
+        return "server_error", "The website is experiencing server errors."
+    
+    # Robots.txt or crawling restrictions
+    elif any(phrase in error_message for phrase in ['robots.txt', 'disallowed', 'blocked by robots']):
+        return "robots_restricted", "The website has restricted automated access in its robots.txt file."
+    
+    # Default fallback
+    return "unknown_error", "An unknown error occurred while trying to access the website."
+
 def crawl_website(url):
-    """Crawl a website using Apify with improved timeout handling."""
+    """Crawl a website using Apify with improved timeout handling and error detection."""
     try:
         logger.info(f"Starting crawl for {url}")
         
@@ -122,7 +169,7 @@ def crawl_website(url):
             run_id = response.json()['data']['id']
         except Exception as e:
             logger.error(f"Error starting crawl: {e}")
-            return None
+            return None, detect_error_type(e)
             
         # Wait for crawl to complete
         endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
@@ -141,7 +188,7 @@ def crawl_website(url):
                         combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
                         if combined_text:
                             logger.info(f"Crawl completed, got {len(combined_text)} characters of content")
-                            return combined_text
+                            return combined_text, (None, None)
                         else:
                             logger.warning(f"Crawl returned data but no text content")
                 else:
@@ -167,18 +214,22 @@ def crawl_website(url):
                         
                         if clean_text and len(clean_text) > 100:
                             logger.info(f"Direct request successful, got {len(clean_text)} characters")
-                            return clean_text
+                            return clean_text, (None, None)
                 except Exception as e:
-                    logger.warning(f"Direct request failed: {e}")
+                    error_type, error_detail = detect_error_type(e)
+                    logger.warning(f"Direct request failed: {e} (Type: {error_type})")
+                    
+                    # Don't return error here, keep trying the main Apify approach
             
             if attempt < max_attempts - 1:
                 time.sleep(10)  # 10-second sleep between checks
         
         logger.warning(f"Crawl timed out after {max_attempts} attempts")
-        return None
+        return None, ("timeout", "The website took too long to respond. It may be experiencing performance issues.")
     except Exception as e:
-        logger.error(f"Error crawling website: {e}")
-        return None
+        error_type, error_detail = detect_error_type(e)
+        logger.error(f"Error crawling website: {e} (Type: {error_type})")
+        return None, (error_type, error_detail)
 
 def save_to_snowflake(domain, url, content, classification):
     """Save classification data to Snowflake"""
@@ -241,6 +292,91 @@ def save_to_snowflake(domain, url, content, classification):
     except Exception as e:
         logger.error(f"Error saving to Snowflake: {e}\n{traceback.format_exc()}")
         return False
+
+def create_error_result(domain, error_type=None, error_detail=None, email=None):
+    """
+    Create a standardized error response based on the error type.
+    
+    Args:
+        domain (str): The domain being processed
+        error_type (str): The type of error detected
+        error_detail (str): Detailed explanation of the error
+        email (str, optional): Email address if processing an email
+        
+    Returns:
+        dict: Standardized error response
+    """
+    # Default error response
+    error_result = {
+        "domain": domain,
+        "error": "Failed to crawl website",
+        "predicted_class": "Unknown",
+        "confidence_score": 0,
+        "confidence_scores": {
+            "Managed Service Provider": 0,
+            "Integrator - Commercial A/V": 0,
+            "Integrator - Residential A/V": 0
+        },
+        "low_confidence": True,
+        "is_crawl_error": True
+    }
+    
+    # Add email if provided
+    if email:
+        error_result["email"] = email
+    
+    # Default explanation
+    explanation = f"We were unable to retrieve content from {domain}. This could be due to a server timeout or the website being unavailable. Without analyzing the website content, we cannot determine the company type."
+    
+    # Enhanced error handling based on error type
+    if error_type:
+        error_result["error_type"] = error_type
+        
+        if error_type.startswith('ssl_'):
+            explanation = f"We couldn't analyze {domain} because of SSL certificate issues. "
+            if error_type == 'ssl_expired':
+                explanation += f"The website's SSL certificate has expired. This is a security issue with the target website, not our classification service."
+            elif error_type == 'ssl_invalid':
+                explanation += f"The website has an invalid SSL certificate. This is a security issue with the target website, not our classification service."
+            else:
+                explanation += f"This is a security issue with the target website, not our classification service."
+            
+            error_result["is_ssl_error"] = True
+            
+        elif error_type == 'dns_error':
+            explanation = f"We couldn't analyze {domain} because the domain could not be resolved. This typically means the domain doesn't exist or its DNS records are misconfigured."
+            error_result["is_dns_error"] = True
+            
+        elif error_type == 'connection_error':
+            explanation = f"We couldn't analyze {domain} because a connection couldn't be established. The website may be down, temporarily unavailable, or blocking our requests."
+            error_result["is_connection_error"] = True
+            
+        elif error_type == 'access_denied':
+            explanation = f"We couldn't analyze {domain} because access was denied. The website may be blocking automated access or requiring authentication."
+            error_result["is_access_denied"] = True
+            
+        elif error_type == 'not_found':
+            explanation = f"We couldn't analyze {domain} because the main page was not found. The website may be under construction or have moved to a different URL."
+            error_result["is_not_found"] = True
+            
+        elif error_type == 'server_error':
+            explanation = f"We couldn't analyze {domain} because the website is experiencing server errors. This is an issue with the target website, not our classification service."
+            error_result["is_server_error"] = True
+            
+        elif error_type == 'robots_restricted':
+            explanation = f"We couldn't analyze {domain} because the website restricts automated access. This is a policy set by the website owner."
+            error_result["is_robots_restricted"] = True
+            
+        elif error_type == 'timeout':
+            explanation = f"We couldn't analyze {domain} because the website took too long to respond. The website may be experiencing performance issues or temporarily unavailable."
+            error_result["is_timeout"] = True
+            
+        # If we have a specific error detail, use it to enhance the explanation
+        if error_detail:
+            explanation += f" {error_detail}"
+    
+    error_result["explanation"] = explanation
+    return error_result
 
 @app.route('/classify-domain', methods=['POST', 'OPTIONS'])
 def classify_domain():
@@ -399,31 +535,16 @@ def classify_domain():
                 content = None
         
         # If no content yet, crawl the website
+        error_type = None
+        error_detail = None
+        
         if not content:
             logger.info(f"Crawling website for {domain}")
-            content = crawl_website(url)
+            content, (error_type, error_detail) = crawl_website(url)
             
             if not content:
-                error_result = {
-                    "domain": domain,
-                    "error": "Failed to crawl website or website has insufficient content",
-                    "predicted_class": "Unknown",
-                    "confidence_score": 0,  # Changed from 5 to 0 to avoid confusion
-                    "confidence_scores": {
-                        "Managed Service Provider": 0,
-                        "Integrator - Commercial A/V": 0,
-                        "Integrator - Residential A/V": 0
-                    },
-                    "explanation": f"We were unable to retrieve content from {domain}. This could be due to a server timeout, SSL certificate issues, or the website being unavailable. Without analyzing the website content, we cannot determine the company type.",
-                    "low_confidence": True,
-                    "is_crawl_error": True  # Added to distinguish crawl errors
-                }
-                
-                # Add email to error response if input was an email
-                if email:
-                    error_result["email"] = email
-                    
-                return jsonify(error_result), 503  # Changed from 500 to 503 (Service Unavailable)
+                error_result = create_error_result(domain, error_type, error_detail, email)
+                return jsonify(error_result), 503  # Service Unavailable
         
         # Classify the content
         if not llm_classifier:
@@ -431,7 +552,7 @@ def classify_domain():
                 "domain": domain, 
                 "error": "LLM classifier is not available",
                 "predicted_class": "Unknown",
-                "confidence_score": 0,  # Changed from 5 to 0
+                "confidence_score": 0,
                 "confidence_scores": {
                     "Managed Service Provider": 0,
                     "Integrator - Commercial A/V": 0,
@@ -455,7 +576,7 @@ def classify_domain():
                 "domain": domain,
                 "error": "Classification failed",
                 "predicted_class": "Unknown",
-                "confidence_score": 0,  # Changed from 5 to 0
+                "confidence_score": 0,
                 "confidence_scores": {
                     "Managed Service Provider": 0,
                     "Integrator - Commercial A/V": 0,
@@ -576,18 +697,11 @@ def classify_domain():
         
     except Exception as e:
         logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
-        return jsonify({
-            "error": str(e),
-            "predicted_class": "Error",
-            "confidence_score": 0,  # Changed from 5 to 0
-            "confidence_scores": {
-                "Managed Service Provider": 0,
-                "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
-            },
-            "explanation": f"An unexpected error occurred while processing your request: {str(e)}",
-            "low_confidence": True
-        }), 500
+        # Try to identify the error type if possible
+        error_type, error_detail = detect_error_type(str(e))
+        error_result = create_error_result(domain if 'domain' in locals() else "unknown", error_type, error_detail, email if 'email' in locals() else None)
+        error_result["error"] = str(e)  # Add the actual error message
+        return jsonify(error_result), 500
 
 @app.route('/classify-email', methods=['POST', 'OPTIONS'])
 def classify_email():
@@ -639,18 +753,10 @@ def classify_email():
         
     except Exception as e:
         logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
-        return jsonify({
-            "error": str(e),
-            "predicted_class": "Error",
-            "confidence_score": 0,  # Changed from 5 to 0
-            "confidence_scores": {
-                "Managed Service Provider": 0,
-                "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
-            },
-            "explanation": f"An unexpected error occurred while processing your email classification request: {str(e)}",
-            "low_confidence": True
-        }), 500
+        error_type, error_detail = detect_error_type(str(e))
+        error_result = create_error_result("unknown", error_type, error_detail)
+        error_result["error"] = str(e)
+        return jsonify(error_result), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
