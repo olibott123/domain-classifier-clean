@@ -587,8 +587,11 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
     
     def _is_parked_domain(self, content: str) -> bool:
         """
-        Detect if a domain is truly parked vs just having minimal content.
+        Enhanced detection of truly parked domains vs. just having minimal content.
         
+        Args:
+            content: The website content
+            
         Returns:
             bool: True if the domain is parked/inactive
         """
@@ -613,15 +616,37 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 logger.info(f"Domain contains parking phrase: '{phrase}'")
                 return True
         
-        # Extremely minimal content (likely parked)
-        if len(content.strip()) < 80:
-            logger.info(f"Domain has extremely little content ({len(content.strip())} chars), considering as parked")
-            return True
+        # Look for JavaScript-heavy sites with minimal crawled content
+        if len(content.strip()) < 100:
+            # More careful analysis before declaring parked
+            
+            # Check for common JS frameworks in the content
+            js_indicators = ["react", "angular", "vue", "javascript", "script", "bootstrap", "jquery"]
+            for indicator in js_indicators:
+                if indicator in content_lower:
+                    logger.info(f"Found JS framework indicator: {indicator} - may be JS-heavy site, not parked")
+                    return False
+            
+            # Check for technical content that suggests a real site with poor crawling
+            tech_indicators = ["<!doctype", "<html", "<head", "<meta", "<title", "<body", "<div"]
+            tech_count = sum(1 for indicator in tech_indicators if indicator in content_lower)
+            
+            if tech_count >= 3:
+                logger.info(f"Found {tech_count} HTML structure indicators - likely a real site with crawling issues")
+                return False
+            
+            # Very little content with no indicators of real site structure
+            if len(content.strip()) < 80:
+                logger.info(f"Domain has extremely little content ({len(content.strip())} chars), considering as parked")
+                return True
         
-        # Very few words (likely parked)
+        # Very few words might indicate a parked domain, but be cautious
         words = re.findall(r'\b\w+\b', content_lower)
-        if len(words) < 15:
-            logger.info(f"Domain has very few words ({len(words)}), considering as parked")
+        unique_words = set(words)
+        
+        # An active site would typically have more unique words unless it's truly minimal
+        if len(unique_words) < 15 and len(content.strip()) < 150:
+            logger.info(f"Domain has very few unique words ({len(unique_words)}) and minimal content, considering as parked")
             return True
             
         return False
