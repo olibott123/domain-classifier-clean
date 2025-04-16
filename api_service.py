@@ -142,12 +142,14 @@ def check_domain_override(domain):
             "Integrator - Residential A/V"
         ]
         
-        # Add internal IT potential for non-service businesses
-        if not result["is_service_business"]:
-            result["internal_it_potential"] = override.get('internal_it_potential', 50)
-            # Add Corporate IT score
-            if "Corporate IT" not in result["confidence_scores"]:
-                result["confidence_scores"]["Corporate IT"] = result["internal_it_potential"]
+        # Ensure Corporate IT score is included
+        if "Corporate IT" not in result["confidence_scores"]:
+            if result["is_service_business"]:
+                # For service businesses, Corporate IT is always 0
+                result["confidence_scores"]["Corporate IT"] = 0
+            else:
+                # For non-service businesses, use internal_it_potential or default
+                result["confidence_scores"]["Corporate IT"] = override.get('internal_it_potential', 50)
         
         return result
     
@@ -181,12 +183,14 @@ def check_domain_override(domain):
                 "Integrator - Residential A/V"
             ]
             
-            # Add internal IT potential for non-service businesses
-            if not result["is_service_business"]:
-                result["internal_it_potential"] = override.get('internal_it_potential', 50)
-                # Add Corporate IT score
-                if "Corporate IT" not in result["confidence_scores"]:
-                    result["confidence_scores"]["Corporate IT"] = result["internal_it_potential"]
+            # Ensure Corporate IT score is included
+            if "Corporate IT" not in result["confidence_scores"]:
+                if result["is_service_business"]:
+                    # For service businesses, Corporate IT is always 0
+                    result["confidence_scores"]["Corporate IT"] = 0
+                else:
+                    # For non-service businesses, use internal_it_potential or default
+                    result["confidence_scores"]["Corporate IT"] = override.get('internal_it_potential', 50)
             
             return result
     
@@ -535,7 +539,8 @@ def create_error_result(domain, error_type=None, error_detail=None, email=None):
         "confidence_scores": {
             "Managed Service Provider": 0,
             "Integrator - Commercial A/V": 0,
-            "Integrator - Residential A/V": 0
+            "Integrator - Residential A/V": 0,
+            "Corporate IT": 0  # Include Corporate IT with score 0
         },
         "low_confidence": True,
         "is_crawl_error": True
@@ -654,15 +659,16 @@ def validate_result_consistency(result, domain):
             result["confidence_scores"] = {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Integrator - Residential A/V": 0,
+                "Corporate IT": 0  # Ensure Corporate IT is included with 0 score
             }
     
+    # Make sure we have confidence_scores
+    if "confidence_scores" not in result:
+        result["confidence_scores"] = {}
+        
     # For Non-Service Business, ensure Corporate IT score is included
     if result.get("predicted_class") == "Non-Service Business":
-        # Make sure we have confidence_scores
-        if "confidence_scores" not in result:
-            result["confidence_scores"] = {}
-            
         # Add Corporate IT if not present
         if "Corporate IT" not in result["confidence_scores"]:
             # Try to extract IT potential from explanation
@@ -685,6 +691,16 @@ def validate_result_consistency(result, domain):
             
             # Set overall confidence to 80% for non-service
             result["confidence_score"] = 80
+    
+    # For service businesses, ensure Corporate IT is included with 0 score
+    elif result.get("predicted_class") in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+        if "Corporate IT" not in result["confidence_scores"]:
+            result["confidence_scores"]["Corporate IT"] = 0
+    
+    # For unknown or parked domains, ensure Corporate IT is included with 0 score
+    elif result.get("predicted_class") in ["Unknown", "Parked Domain"]:
+        if "Corporate IT" not in result["confidence_scores"]:
+            result["confidence_scores"]["Corporate IT"] = 0
     
     # Fix step numbering if it's off (e.g. starting at 6 instead of 1)
     explanation = result.get("explanation", "")
@@ -723,7 +739,7 @@ def validate_result_consistency(result, domain):
                     confidence = result.get("confidence_score", 80)
                     new_explanation += f"STEP 3: The company is a service business that provides services to other businesses\n\n"
                     new_explanation += f"STEP 4: Based on the service offerings described, this company is classified as a {predicted_class} with {confidence}% confidence\n\n"
-                    new_explanation += f"STEP 5: Since this is classified as a service business, there is no need to assess the internal IT potential\n\n"
+                    new_explanation += f"STEP 5: Since this is classified as a service business, the internal IT potential is set to 0/100\n\n"
                 else:
                     # Try to extract internal IT potential from confidence scores
                     it_potential = 50  # Default
@@ -906,6 +922,9 @@ def classify_domain():
                                 "Integrator - Commercial A/V": 10, 
                                 "Managed Service Provider": 10
                             }
+                    
+                    # Ensure Corporate IT is included with score 0 for service businesses
+                    processed_scores["Corporate IT"] = 0
                 
                 # For Non-Service Business, ensure Corporate IT score is included
                 elif orig_predicted_class == "Non-Service Business":
@@ -980,7 +999,8 @@ def classify_domain():
                 "confidence_scores": {
                     "Managed Service Provider": 0,
                     "Integrator - Commercial A/V": 0,
-                    "Integrator - Residential A/V": 0
+                    "Integrator - Residential A/V": 0,
+                    "Corporate IT": 0
                 },
                 "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
                 "low_confidence": True,
@@ -1017,7 +1037,8 @@ def classify_domain():
                 "confidence_scores": {
                     "Managed Service Provider": 0,
                     "Integrator - Commercial A/V": 0,
-                    "Integrator - Residential A/V": 0
+                    "Integrator - Residential A/V": 0,
+                    "Corporate IT": 0
                 },
                 "explanation": "Our classification system is temporarily unavailable. Please try again later. This issue has been logged and will be addressed by our technical team.",
                 "low_confidence": True,
@@ -1042,7 +1063,8 @@ def classify_domain():
                 "confidence_scores": {
                     "Managed Service Provider": 0,
                     "Integrator - Commercial A/V": 0,
-                    "Integrator - Residential A/V": 0
+                    "Integrator - Residential A/V": 0,
+                    "Corporate IT": 0
                 },
                 "explanation": f"We encountered an issue while analyzing {domain}. Although content was retrieved from the website, our classification system was unable to process it properly. This could be due to unusual formatting or temporary system limitations.",
                 "low_confidence": True,
@@ -1066,7 +1088,10 @@ def classify_domain():
                 "predicted_class": "Parked Domain",  # Clear indicator in the UI
                 "confidence_score": 0,  # Zero confidence rather than 5%
                 "confidence_scores": {
-                    category: 0 for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0,
+                    "Corporate IT": 0
                 },
                 "explanation": classification.get('llm_explanation', 'This appears to be a parked or inactive domain without business-specific content.'),
                 "low_confidence": True,
@@ -1125,26 +1150,30 @@ def classify_domain():
                     processed_scores = {
                         "Managed Service Provider": 90,
                         "Integrator - Commercial A/V": 10,
-                        "Integrator - Residential A/V": 10
+                        "Integrator - Residential A/V": 10,
+                        "Corporate IT": 0
                     }
                 elif pred_class == "Integrator - Commercial A/V":
                     processed_scores = {
                         "Integrator - Commercial A/V": 90,
                         "Managed Service Provider": 10,
-                        "Integrator - Residential A/V": 10
+                        "Integrator - Residential A/V": 10,
+                        "Corporate IT": 0
                     }
                 elif pred_class == "Integrator - Residential A/V":  # Residential A/V
                     processed_scores = {
                         "Integrator - Residential A/V": 90,
                         "Integrator - Commercial A/V": 10, 
-                        "Managed Service Provider": 10
+                        "Managed Service Provider": 10,
+                        "Corporate IT": 0
                     }
                 elif pred_class == "Process Did Not Complete":
                     # Set all scores to 0 for process_did_not_complete
                     processed_scores = {
                         "Managed Service Provider": 0,
                         "Integrator - Commercial A/V": 0,
-                        "Integrator - Residential A/V": 0
+                        "Integrator - Residential A/V": 0,
+                        "Corporate IT": 0
                     }
                     # Reset max_confidence to 0.0
                     max_confidence = 0
@@ -1191,6 +1220,10 @@ def classify_domain():
                 
                 # Set confidence score to a consistent value for non-service business
                 max_confidence = 80
+            
+            # For service businesses, ensure Corporate IT is 0
+            elif classification.get('predicted_class') in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                processed_scores["Corporate IT"] = 0
                 
             result = {
                 "domain": domain,
