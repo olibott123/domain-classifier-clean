@@ -24,10 +24,7 @@ CORS(app)
 # Domain override system for special cases
 DOMAIN_OVERRIDES = {
     # Format: 'domain': {'classification': 'type', 'confidence': score, 'explanation': 'text'}
-    
-        }
-    },
-    # Add other problematic domains as needed
+    # Add domains as needed
 }
 
 # Custom JSON encoder to handle problematic types
