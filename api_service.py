@@ -11,6 +11,7 @@ import numpy as np
 import logging
 import traceback
 import re
+import socket
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -152,6 +153,14 @@ def crawl_website(url):
     """Crawl a website using Apify with improved timeout handling and error detection."""
     try:
         logger.info(f"Starting crawl for {url}")
+        
+        # Quick DNS check before attempting full crawl
+        try:
+            domain = urlparse(url).netloc
+            socket.gethostbyname(domain)
+        except socket.gaierror:
+            logger.warning(f"Domain {domain} does not resolve - DNS error")
+            return None, ("dns_error", "This domain does not exist or cannot be resolved")
         
         # Start the crawl
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
@@ -417,6 +426,53 @@ def validate_result_consistency(result, domain):
                 logger.warning(f"Correcting predicted_class from {result['predicted_class']} to Non-Service Business based on explanation")
                 result["predicted_class"] = "Non-Service Business"
                 
+    # Ensure "Process Did Not Complete" has 0% confidence
+    if result.get("predicted_class") == "Process Did Not Complete":
+        result["confidence_score"] = 0
+        if "confidence_scores" in result:
+            result["confidence_scores"] = {
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
+            }
+    
+    # Ensure explanation has step-by-step format if it's not a parked domain or process did not complete
+    if (result.get("predicted_class") not in ["Parked Domain", "Process Did Not Complete", "Unknown"] 
+        and "explanation" in result):
+        explanation = result["explanation"]
+        
+        # Check if the explanation already has the STEP format
+        if not any(f"STEP {i}" in explanation for i in range(1, 6)) and not any(f"STEP {i}:" in explanation for i in range(1, 6)):
+            # If not already in step format and not numbered like "1:", "2:", etc.
+            if not any(f"{i}:" in explanation for i in range(1, 6)):
+                domain_name = domain or "This domain"
+                predicted_class = result.get("predicted_class", "Unknown")
+                is_service = predicted_class in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]
+                
+                # Create a structured explanation with STEP format
+                new_explanation = f"Based on the website content, {domain_name} is classified as a {predicted_class}\n\n"
+                new_explanation += f"STEP 1: The website content provides sufficient information to analyze and classify the business, so the processing status is successful\n\n"
+                new_explanation += f"STEP 2: The domain is not parked, under construction, or for sale, so it is not a Parked Domain\n\n"
+                
+                if is_service:
+                    confidence = result.get("confidence_score", 80)
+                    new_explanation += f"STEP 3: The company is a service business that provides services to other businesses\n\n"
+                    new_explanation += f"STEP 4: Based on the service offerings described, this company is classified as a {predicted_class} with {confidence}% confidence\n\n"
+                    new_explanation += f"STEP 5: Since this is classified as a service business, there is no need to assess the internal IT potential\n\n"
+                else:
+                    # Try to extract internal IT potential from confidence scores
+                    it_potential = 50  # Default
+                    if "confidence_scores" in result and "Corporate IT" in result["confidence_scores"]:
+                        it_potential = result["confidence_scores"]["Corporate IT"]
+                    
+                    new_explanation += f"STEP 3: The company is NOT a service/management business that provides ongoing IT or A/V services to clients\n\n"
+                    new_explanation += f"STEP 4: Since this is not a service business, we classify it as {predicted_class}\n\n"
+                    new_explanation += f"STEP 5: As a non-service business, we assess its internal IT potential at {it_potential}/100\n\n"
+                    
+                # Include the original explanation as a summary
+                new_explanation += f"In summary: {explanation}"
+                result["explanation"] = new_explanation
+    
     # Ensure explanation is consistent with predicted_class
     if result.get("explanation") and "based on" in result["explanation"].lower():
         explanation = result["explanation"]
@@ -443,6 +499,11 @@ def classify_domain():
         input_value = data.get('url', '').strip()
         force_reclassify = data.get('force_reclassify', False)
         use_existing_content = data.get('use_existing_content', False)
+        
+        # Always set force_reclassify to true for new requests unless explicitly using existing content
+        if request.method == 'POST' and 'use_existing_content' not in data:
+            # Set a default preference for fresh classification
+            force_reclassify = data.get('force_reclassify', True)
         
         if not input_value:
             return jsonify({"error": "URL or email is required"}), 400
@@ -760,15 +821,25 @@ def classify_domain():
                         "Managed Service Provider": 15,
                         "Integrator - Residential A/V": 5
                     }
-                else:  # Assume Residential A/V
+                elif pred_class == "Integrator - Residential A/V":  # Residential A/V
                     processed_scores = {
                         "Integrator - Residential A/V": 80,
                         "Integrator - Commercial A/V": 15, 
                         "Managed Service Provider": 5
                     }
+                elif pred_class == "Process Did Not Complete":
+                    # Set all scores to 0 for process_did_not_complete
+                    processed_scores = {
+                        "Managed Service Provider": 0,
+                        "Integrator - Commercial A/V": 0,
+                        "Integrator - Residential A/V": 0
+                    }
+                    # Reset max_confidence to 0.0
+                    max_confidence = 0
                 
-                # Update max_confidence to match the new highest value
-                max_confidence = 80
+                # Update max_confidence to match the new highest value if not Process Did Not Complete
+                if pred_class != "Process Did Not Complete":
+                    max_confidence = 80
             
             # Ensure explanation exists
             explanation = classification.get('llm_explanation', '')
