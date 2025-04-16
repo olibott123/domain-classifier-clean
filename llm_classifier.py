@@ -1293,8 +1293,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 logger.info(f"Domain name indicates vacation/travel business (non-service): {domain}")
                 
             # Special case for transportation/logistics
-            transport_terms = ["trucking", "transport", "logistics", "shipping", "freight",
-transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery"]
+            transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery"]
             if any(term in domain_lower for term in transport_terms):
                 is_service = False
                 logger.info(f"Domain name indicates transportation/logistics business (non-service): {domain}")
