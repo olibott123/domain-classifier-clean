@@ -22,9 +22,19 @@ app = Flask(__name__)
 CORS(app)
 
 # Domain override system for special cases
+# Domain override system for special cases
 DOMAIN_OVERRIDES = {
     # Format: 'domain': {'classification': 'type', 'confidence': score, 'explanation': 'text'}
-    # Add domains as needed
+    'nwaj.tech': {
+        'classification': 'Managed Service Provider',
+        'confidence': 85,
+        'explanation': 'NWAJ Tech is a cybersecurity and zero trust security provider offering managed security services. They specialize in implementing zero trust security frameworks, which is a clear indication they are a Managed Service Provider focused on cybersecurity services.',
+        'confidence_scores': {
+            'Managed Service Provider': 85,
+            'Integrator - Commercial A/V': 10,
+            'Integrator - Residential A/V': 5
+        }
+    }
 }
 
 # Custom JSON encoder to handle problematic types
