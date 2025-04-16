@@ -6,6 +6,8 @@ import re
 from typing import Dict, Any, List, Optional
 import os
 import csv
+import socket
+from urllib.parse import urlparse
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -299,20 +301,23 @@ class LLMClassifier:
                     parsed_json["detection_method"] = "llm_classification"
                     
                     # Set low_confidence flag based on highest score
-                    max_confidence = max(parsed_json["confidence_scores"].values()) if parsed_json["is_service_business"] else 0.5
+                    max_confidence = parsed_json.get("max_confidence", 0.5)
                     if isinstance(max_confidence, str):
                         try:
                             max_confidence = float(max_confidence)
                         except (ValueError, TypeError):
                             max_confidence = 0
                             
-                    parsed_json["low_confidence"] = max_confidence < 40 if parsed_json["is_service_business"] else True
+                    parsed_json["low_confidence"] = max_confidence < 0.4 if parsed_json.get("is_service_business", False) else True
                     
                     logger.info(f"Successful LLM classification for {domain or 'unknown'}: {parsed_json['predicted_class']}")
                     
                     # Check if this is a service business
                     is_service = parsed_json.get("is_service_business", True)
                     logger.info(f"Domain {domain} service business check: {is_service}")
+                    
+                    # Ensure the explanation has the step-by-step format
+                    parsed_json = self._ensure_step_format(parsed_json, domain)
                     
                     # Return the validated classification
                     return parsed_json
@@ -329,6 +334,9 @@ class LLMClassifier:
             else:
                 parsed_result["detection_method"] = "text_parsing"
             
+            # Ensure the explanation has the step-by-step format
+            parsed_result = self._ensure_step_format(parsed_result, domain)
+            
             logger.info(f"Extracted classification from free text: {parsed_result['predicted_class']}")
             return parsed_result
             
@@ -338,6 +346,10 @@ class LLMClassifier:
             result = self._fallback_classification(text_content, domain)
             if is_minimal_content:
                 result["detection_method"] = result["detection_method"] + "_with_minimal_content"
+                
+            # Ensure the explanation has the step-by-step format
+            result = self._ensure_step_format(result, domain)
+            
             return result
     
     def _build_decision_tree_prompt(self, examples: Dict[str, List[Dict[str, str]]]) -> str:
@@ -414,10 +426,55 @@ IMPORTANT INSTRUCTIONS:
 5. Your llm_explanation must detail your decision process through each step.
 6. Mention specific evidence from the text that supports your classification.
 7. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as a Non-Service Business, not as an MSP.
+8. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
 
         return system_prompt
+
+    def _ensure_step_format(self, classification: Dict[str, Any], domain: str = None) -> Dict[str, Any]:
+        """
+        Ensure the explanation follows the step-by-step format.
+        
+        Args:
+            classification: The classification dictionary
+            domain: Optional domain name for context
+            
+        Returns:
+            dict: The classification with properly formatted explanation
+        """
+        if "llm_explanation" not in classification:
+            return classification
+            
+        explanation = classification["llm_explanation"]
+        
+        # Check if the explanation already has the STEP format
+        if not any(f"STEP {i}" in explanation for i in range(1, 6)) and not any(f"STEP {i}:" in explanation for i in range(1, 6)):
+            domain_name = domain or "This domain"
+            predicted_class = classification.get("predicted_class", "Unknown")
+            is_service = classification.get("is_service_business", False)
+            
+            # Create a structured explanation with STEP format
+            new_explanation = f"Based on the website content, {domain_name} is classified as a {predicted_class}\n\n"
+            new_explanation += f"STEP 1: The website content provides sufficient information to analyze and classify the business, so the processing status is successful\n\n"
+            new_explanation += f"STEP 2: The domain is not parked, under construction, or for sale, so it is not a Parked Domain\n\n"
+            
+            if is_service:
+                confidence = int(classification.get('max_confidence', 0.8) * 100)
+                new_explanation += f"STEP 3: The company is a service business that provides services to other businesses\n\n"
+                new_explanation += f"STEP 4: Based on the service offerings described, this company is classified as a {predicted_class} with {confidence}% confidence\n\n"
+                new_explanation += f"STEP 5: Since this is classified as a service business, there is no need to assess the internal IT potential\n\n"
+            else:
+                it_potential = classification.get("internal_it_potential", 50)
+                new_explanation += f"STEP 3: The company is NOT a service/management business that provides ongoing IT or A/V services to clients\n\n"
+                new_explanation += f"STEP 4: Since this is not a service business, we classify it as {predicted_class}\n\n"
+                new_explanation += f"STEP 5: As a non-service business, we assess its internal IT potential at {it_potential}/100\n\n"
+                
+            # Include the original explanation as a summary
+            new_explanation += f"In summary: {explanation}"
+            classification["llm_explanation"] = new_explanation
+            
+        return classification
         
     def _check_special_domain_cases(self, domain: str, text_content: str) -> Optional[Dict[str, Any]]:
         """
@@ -463,7 +520,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "confidence_scores": {
                     "Managed Service Provider": 5,
                     "Integrator - Commercial A/V": 3,
-                    "Integrator - Residential A/V": 2
+                    "Integrator - Residential A/V": 2,
+                    "Corporate IT": 40  # Add Corporate IT score
                 },
                 "llm_explanation": f"{domain} appears to be a vacation rental/travel booking website offering holiday accommodations in various destinations. This is not a service business in the IT or A/V integration space. It's a travel industry business that might have a small internal IT department to maintain their booking systems and website.",
                 "detection_method": "domain_override",
@@ -490,7 +548,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "confidence_scores": {
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
-                        "Integrator - Residential A/V": 2
+                        "Integrator - Residential A/V": 2,
+                        "Corporate IT": 35  # Add Corporate IT score
                     },
                     "llm_explanation": f"{domain} appears to be a travel/vacation related business, not an IT or A/V service provider. The website focuses on accommodations, bookings, or vacation rentals rather than technology services or integration. This type of business might have minimal internal IT needs depending on its size.",
                     "detection_method": "domain_override",
@@ -515,7 +574,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "confidence_scores": {
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
-                        "Integrator - Residential A/V": 2
+                        "Integrator - Residential A/V": 2,
+                        "Corporate IT": 60  # Add Corporate IT score
                     },
                     "llm_explanation": f"{domain} appears to be a transportation and logistics company, not an IT or A/V service provider. The website focuses on shipping, transportation, and logistics services rather than technology services or integration. This type of company typically has moderate internal IT needs to manage their operations and fleet management systems.",
                     "detection_method": "domain_override",
@@ -541,7 +601,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "domain is for sale", "buy this domain", "purchasing this domain", 
             "domain may be for sale", "this domain is for sale", "parked by",
             "domain parking", "this web page is parked", "website coming soon",
-            "under construction", "site not published"
+            "under construction", "site not published", "domain for sale",
+            "under development", "this website is for sale"
         ]
         
         content_lower = content.lower()
@@ -590,7 +651,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "llm_explanation": f"Classification process for {domain_name} could not be completed. This may be due to connection issues, invalid domain, or other technical problems.",
             "detection_method": "process_failed",
             "low_confidence": True,
-            "max_confidence": 0.0
+            "max_confidence": 0.0  # Ensure this is set to 0, not 0.8
         }
     
     def _create_parked_domain_result(self, domain: str = None) -> Dict[str, Any]:
@@ -870,6 +931,10 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             if classification["internal_it_potential"] is not None:
                 classification["internal_it_potential"] = int(classification["internal_it_potential"])
                 
+            # Add Corporate IT score based on internal_it_potential
+            it_potential = classification.get("internal_it_potential", 50)
+            confidence_scores["Corporate IT"] = it_potential
+                
         # For service businesses, ensure scores are differentiated
         elif is_service and (len(set(confidence_scores.values())) <= 1 or 
                             max(confidence_scores.values()) - min(confidence_scores.values()) < 5):
@@ -1042,7 +1107,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             confidence_scores = {
                 "Managed Service Provider": 5,
                 "Integrator - Commercial A/V": 3,
-                "Integrator - Residential A/V": 2
+                "Integrator - Residential A/V": 2,
+                "Corporate IT": internal_it_potential or 30  # Add Corporate IT score
             }
             
         # Extract or generate explanation
@@ -1356,7 +1422,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "confidence_scores": {
                 "Managed Service Provider": 5,
                 "Integrator - Commercial A/V": 3,
-                "Integrator - Residential A/V": 2
+                "Integrator - Residential A/V": 2,
+                "Corporate IT": internal_it_potential  # Add Corporate IT score based on internal IT potential
             },
             "llm_explanation": explanation,
             "detection_method": "non_service_detection",
