@@ -21,6 +21,22 @@ app = Flask(__name__)
 # Enable CORS for all routes
 CORS(app)
 
+# Domain override system for special cases
+DOMAIN_OVERRIDES = {
+    # Format: 'domain': {'classification': 'type', 'confidence': score, 'explanation': 'text'}
+    'nwaj.tech': {
+        'classification': 'Managed Service Provider',
+        'confidence': 85,
+        'explanation': 'NWAJ Tech is a cybersecurity and zero trust security provider offering managed security services. They specialize in implementing zero trust security frameworks, which is a clear indication they are a Managed Service Provider focused on cybersecurity services.',
+        'confidence_scores': {
+            'Managed Service Provider': 85,
+            'Integrator - Commercial A/V': 10,
+            'Integrator - Residential A/V': 5
+        }
+    },
+    # Add other problematic domains as needed
+}
+
 # Custom JSON encoder to handle problematic types
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -83,6 +99,98 @@ except Exception as e:
             return None
     
     snowflake_conn = FallbackSnowflakeConnector()
+
+def check_domain_override(domain):
+    """
+    Check if domain has a manual override classification.
+    
+    Args:
+        domain (str): The domain to check
+        
+    Returns:
+        dict or None: Override classification if available, None otherwise
+    """
+    domain_lower = domain.lower()
+    
+    # Check exact match
+    if domain_lower in DOMAIN_OVERRIDES:
+        logger.info(f"Using override classification for {domain}")
+        override = DOMAIN_OVERRIDES[domain_lower]
+        
+        # Create a standardized result
+        result = {
+            "domain": domain,
+            "predicted_class": override['classification'],
+            "confidence_score": override['confidence'],
+            "confidence_scores": override.get('confidence_scores', {
+                "Managed Service Provider": 0,
+                "Integrator - Commercial A/V": 0,
+                "Integrator - Residential A/V": 0
+            }),
+            "explanation": override['explanation'],
+            "low_confidence": False,
+            "detection_method": "manual_override",
+            "source": "override",
+            "is_parked": False,
+            "max_confidence": override['confidence'] / 100.0
+        }
+        
+        # Set service business flag
+        result["is_service_business"] = result["predicted_class"] in [
+            "Managed Service Provider", 
+            "Integrator - Commercial A/V", 
+            "Integrator - Residential A/V"
+        ]
+        
+        # Add internal IT potential for non-service businesses
+        if not result["is_service_business"]:
+            result["internal_it_potential"] = override.get('internal_it_potential', 50)
+            # Add Corporate IT score
+            if "Corporate IT" not in result["confidence_scores"]:
+                result["confidence_scores"]["Corporate IT"] = result["internal_it_potential"]
+        
+        return result
+    
+    # Check for domain pattern matches (for bulk overrides)
+    for pattern, override in DOMAIN_OVERRIDES.items():
+        if pattern.startswith('*.') and domain_lower.endswith(pattern[1:]):
+            logger.info(f"Using pattern override classification for {domain} (matches {pattern})")
+            
+            # Create a standardized result (similar to above)
+            result = {
+                "domain": domain,
+                "predicted_class": override['classification'],
+                "confidence_score": override['confidence'],
+                "confidence_scores": override.get('confidence_scores', {
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0
+                }),
+                "explanation": override['explanation'],
+                "low_confidence": False,
+                "detection_method": "manual_override",
+                "source": "override",
+                "is_parked": False,
+                "max_confidence": override['confidence'] / 100.0
+            }
+            
+            # Set service business flag
+            result["is_service_business"] = result["predicted_class"] in [
+                "Managed Service Provider", 
+                "Integrator - Commercial A/V", 
+                "Integrator - Residential A/V"
+            ]
+            
+            # Add internal IT potential for non-service businesses
+            if not result["is_service_business"]:
+                result["internal_it_potential"] = override.get('internal_it_potential', 50)
+                # Add Corporate IT score
+                if "Corporate IT" not in result["confidence_scores"]:
+                    result["confidence_scores"]["Corporate IT"] = result["internal_it_potential"]
+            
+            return result
+    
+    return None
 
 def extract_domain_from_email(email):
     """Extract domain from an email address."""
@@ -150,7 +258,7 @@ def detect_error_type(error_message):
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
 def crawl_website(url):
-    """Crawl a website using Apify with improved timeout handling and error detection."""
+    """Crawl a website using Apify with improved multi-stage approach for JavaScript-heavy sites."""
     try:
         logger.info(f"Starting crawl for {url}")
         
@@ -162,13 +270,13 @@ def crawl_website(url):
             logger.warning(f"Domain {domain} does not resolve - DNS error")
             return None, ("dns_error", "This domain does not exist or cannot be resolved")
         
-        # Start the crawl
+        # Start the crawl with standard settings
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
         payload = {
             "startUrls": [{"url": url}],
-            "maxCrawlingDepth": 1,      # Limit depth for faster crawls
-            "maxCrawlPages": 5,         # Reduced from 10 to 5 for faster crawls
-            "timeoutSecs": 120          # Set explicit timeout for Apify
+            "maxCrawlingDepth": 1,
+            "maxCrawlPages": 5,
+            "timeoutSecs": 120
         }
         headers = {"Content-Type": "application/json"}
         
@@ -183,23 +291,24 @@ def crawl_website(url):
         # Wait for crawl to complete
         endpoint = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={APIFY_API_TOKEN}"
         
-        max_attempts = 12  # Reduced from 30 to 12 (about 2 minutes total)
+        max_attempts = 12
         for attempt in range(max_attempts):
             logger.info(f"Checking crawl results, attempt {attempt+1}/{max_attempts}")
             
             try:
-                response = requests.get(endpoint, timeout=10)  # Shorter timeout for status checks
+                response = requests.get(endpoint, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
                     
                     if data:
                         combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
-                        if combined_text:
+                        if combined_text and len(combined_text.strip()) > 100:
                             logger.info(f"Crawl completed, got {len(combined_text)} characters of content")
                             return combined_text, (None, None)
-                        else:
-                            logger.warning(f"Crawl returned data but no text content")
+                        elif combined_text:
+                            logger.warning(f"Crawl returned minimal content: {len(combined_text)} characters")
+                            # Continue trying, might get better results on next attempt
                 else:
                     logger.warning(f"Received status code {response.status_code} when checking crawl results")
             except requests.exceptions.Timeout:
@@ -207,34 +316,135 @@ def crawl_website(url):
             except Exception as e:
                 logger.warning(f"Error checking crawl status: {e}")
             
-            # Check if we've tried enough times and should try the fallback approach
-            if attempt == 5:  # After about 50 seconds (6 attempts)
-                logger.info("Trying fallback approach with direct request...")
+            # Stage 2: Try Puppeteer approach explicitly after a few normal attempts
+            if attempt == 4:
+                logger.info("Trying Puppeteer-based approach for JavaScript-heavy site...")
+                
+                # Create a new task run with Puppeteer-specific settings
+                puppeteer_payload = {
+                    "startUrls": [{"url": url}],
+                    "maxCrawlPages": 3,
+                    "crawlerType": "playwright:chrome",  # Force Chrome browser
+                    "dynamicContentWaitSecs": 15,        # Longer wait for JS content
+                    "waitForSelectorSecs": 10,           # Wait for DOM elements
+                    "expandIframes": True,               # Get iframe content
+                    "clickElementsCssSelector": "button, [aria-expanded='false']",  # Click expandable elements
+                    "saveHtml": True,                    # Save raw HTML for backup
+                    "proxyConfiguration": {
+                        "useApifyProxy": True,
+                        "apifyProxyGroups": ["RESIDENTIAL"]  # Use residential proxies
+                    }
+                }
+                
                 try:
-                    direct_response = requests.get(url, timeout=15)
+                    puppeteer_response = requests.post(endpoint.split('dataset')[0] + "?token=" + APIFY_API_TOKEN, 
+                                                       json=puppeteer_payload, 
+                                                       headers=headers, 
+                                                       timeout=30)
+                    puppeteer_response.raise_for_status()
+                    puppeteer_run_id = puppeteer_response.json()['data']['id']
+                    
+                    # Wait for Puppeteer crawl to complete (separate from main loop)
+                    puppeteer_endpoint = f"https://api.apify.com/v2/actor-runs/{puppeteer_run_id}/dataset/items?token={APIFY_API_TOKEN}"
+                    
+                    # Give it time to start up
+                    time.sleep(5)
+                    
+                    for p_attempt in range(8):  # Fewer attempts but longer waits
+                        logger.info(f"Checking Puppeteer crawl results, attempt {p_attempt+1}/8")
+                        
+                        try:
+                            p_response = requests.get(puppeteer_endpoint, timeout=15)
+                            
+                            if p_response.status_code == 200:
+                                p_data = p_response.json()
+                                
+                                if p_data:
+                                    # Try to get text content from all fields that might have it
+                                    text_fields = []
+                                    for item in p_data:
+                                        if item.get('text'):
+                                            text_fields.append(item.get('text', ''))
+                                        # Also try to extract from HTML if text is minimal
+                                        elif item.get('html') and (not item.get('text') or len(item.get('text', '')) < 100):
+                                            # Simple HTML to text extraction
+                                            html_text = re.sub(r'<[^>]+>', ' ', item.get('html', ''))
+                                            html_text = re.sub(r'\s+', ' ', html_text).strip()
+                                            if len(html_text) > 100:
+                                                text_fields.append(html_text)
+                                    
+                                    puppeteer_text = ' '.join(text_fields)
+                                    
+                                    if puppeteer_text and len(puppeteer_text.strip()) > 100:
+                                        logger.info(f"Puppeteer crawl successful, got {len(puppeteer_text)} characters")
+                                        return puppeteer_text, (None, None)
+                        except Exception as e:
+                            logger.warning(f"Error checking Puppeteer crawl: {e}")
+                            
+                        time.sleep(12)  # Longer wait between Puppeteer checks
+                        
+                except Exception as e:
+                    logger.error(f"Error with Puppeteer approach: {e}")
+            
+            # Stage 3: Direct request fallback
+            if attempt == 7:  # After about 70 seconds
+                logger.info("Trying direct request fallback...")
+                try:
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5'
+                    }
+                    direct_response = requests.get(url, headers=headers, timeout=15)
+                    
                     if direct_response.status_code == 200:
                         # Use a simple content extraction approach
                         text_content = direct_response.text
                         
-                        # Extract readable text by removing HTML tags (simple approach)
-                        import re
+                        # Extract readable text by removing HTML tags
                         clean_text = re.sub(r'<[^>]+>', ' ', text_content)
                         clean_text = re.sub(r'\s+', ' ', clean_text).strip()
                         
                         if clean_text and len(clean_text) > 100:
                             logger.info(f"Direct request successful, got {len(clean_text)} characters")
                             return clean_text, (None, None)
+                        else:
+                            logger.warning(f"Direct request returned minimal content: {len(clean_text)} characters")
                 except Exception as e:
                     error_type, error_detail = detect_error_type(e)
                     logger.warning(f"Direct request failed: {e} (Type: {error_type})")
-                    
-                    # Don't return error here, keep trying the main Apify approach
             
+            # Wait between attempts for the main crawl
             if attempt < max_attempts - 1:
-                time.sleep(10)  # 10-second sleep between checks
+                time.sleep(10)
         
-        logger.warning(f"Crawl timed out after {max_attempts} attempts")
-        return None, ("timeout", "The website took too long to respond. It may be experiencing performance issues.")
+        # If we still don't have good content but have some minimal content,
+        # return it rather than failing completely
+        if 'combined_text' in locals() and combined_text:
+            logger.warning(f"Using minimal content ({len(combined_text)} chars) as fallback")
+            return combined_text, (None, None)
+            
+        # Try one last direct request if we have nothing else
+        try:
+            logger.info("Final direct request attempt...")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            final_response = requests.get(url, headers=headers, timeout=15)
+            
+            if final_response.status_code == 200:
+                # Just get any text we can
+                final_text = re.sub(r'<[^>]+>', ' ', final_response.text)
+                final_text = re.sub(r'\s+', ' ', final_text).strip()
+                
+                if len(final_text) > 19:  # Better than the 19 chars we got before
+                    logger.info(f"Final direct request got {len(final_text)} characters")
+                    return final_text, (None, None)
+        except Exception:
+            pass
+            
+        logger.warning(f"Crawl timed out after all attempts")
+        return None, ("timeout", "The website took too long to respond or has minimal crawlable content.")
     except Exception as e:
         error_type, error_detail = detect_error_type(e)
         logger.error(f"Error crawling website: {e} (Type: {error_type})")
@@ -593,6 +803,20 @@ def classify_domain():
         url = f"https://{domain}"
         logger.info(f"Processing classification request for {domain}")
         
+        # Check for domain override before any other processing
+        domain_override = check_domain_override(domain)
+        if domain_override:
+            # Add email to response if input was an email
+            if email:
+                domain_override["email"] = email
+                
+            # Add website URL for clickable link
+            domain_override["website_url"] = url
+            
+            # Return the override directly
+            logger.info(f"Sending override response to client: {json.dumps(domain_override)}")
+            return jsonify(domain_override), 200
+        
         # Check for existing classification if not forcing reclassification
         if not force_reclassify:
             existing_record = snowflake_conn.check_existing_classification(domain)
@@ -712,7 +936,8 @@ def classify_domain():
                     "low_confidence": low_confidence,
                     "detection_method": existing_record.get('detection_method', 'api'),
                     "source": "cached",
-                    "is_parked": is_parked
+                    "is_parked": is_parked,
+                    "website_url": url  # Add website URL for clickable link
                 }
                 
                 # Add email to response if input was an email
@@ -759,7 +984,8 @@ def classify_domain():
                 },
                 "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
                 "low_confidence": True,
-                "no_existing_content": True
+                "no_existing_content": True,
+                "website_url": url  # Add website URL for clickable link
             }
             
             # Add email to response if input was an email
@@ -778,6 +1004,7 @@ def classify_domain():
             
             if not content:
                 error_result = create_error_result(domain, error_type, error_detail, email)
+                error_result["website_url"] = url  # Add website URL for clickable link
                 return jsonify(error_result), 503  # Service Unavailable
         
         # Classify the content
@@ -793,7 +1020,8 @@ def classify_domain():
                     "Integrator - Residential A/V": 0
                 },
                 "explanation": "Our classification system is temporarily unavailable. Please try again later. This issue has been logged and will be addressed by our technical team.",
-                "low_confidence": True
+                "low_confidence": True,
+                "website_url": url  # Add website URL for clickable link
             }
             
             # Add email to error response if input was an email
@@ -817,7 +1045,8 @@ def classify_domain():
                     "Integrator - Residential A/V": 0
                 },
                 "explanation": f"We encountered an issue while analyzing {domain}. Although content was retrieved from the website, our classification system was unable to process it properly. This could be due to unusual formatting or temporary system limitations.",
-                "low_confidence": True
+                "low_confidence": True,
+                "website_url": url  # Add website URL for clickable link
             }
             
             # Add email to error response if input was an email
@@ -843,7 +1072,8 @@ def classify_domain():
                 "low_confidence": True,
                 "detection_method": classification.get('detection_method', 'parked_domain_detection'),
                 "source": "fresh",
-                "is_parked": True
+                "is_parked": True,
+                "website_url": url  # Add website URL for clickable link
             }
         else:
             # [UPDATED SECTION] - Fixed Fresh Classification Handling
@@ -971,7 +1201,8 @@ def classify_domain():
                 "low_confidence": classification.get('low_confidence', False),
                 "detection_method": classification.get('detection_method', 'api'),
                 "source": "fresh",
-                "is_parked": False
+                "is_parked": False,
+                "website_url": url  # Add website URL for clickable link
             }
 
         # Add email to response if input was an email
@@ -992,6 +1223,8 @@ def classify_domain():
         error_type, error_detail = detect_error_type(str(e))
         error_result = create_error_result(domain if 'domain' in locals() else "unknown", error_type, error_detail, email if 'email' in locals() else None)
         error_result["error"] = str(e)  # Add the actual error message
+        if 'url' in locals():
+            error_result["website_url"] = url  # Add website URL for clickable link
         return jsonify(error_result), 500
 
 @app.route('/classify-email', methods=['POST', 'OPTIONS'])
