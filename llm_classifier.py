@@ -387,6 +387,8 @@ STEP 5: If it is NOT a service business, determine if it's a business that could
 - Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, etc.
 
 IMPORTANT GUIDELINES:
+- Service businesses should have a Corporate IT score of 0 (as they are providing services, not consuming IT internally)
+- Non-service businesses should have a Corporate IT score between 1-100 indicating their internal IT potential
 - Vacation rental services, travel agencies, and hospitality businesses are NOT A/V Integrators
 - Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer IT services
 - Media production companies are NOT necessarily A/V integrators
@@ -409,11 +411,12 @@ Here are examples of correctly classified companies:"""
   "processing_status": [0 if processing failed, 1 if domain is parked, 2 if classification successful],
   "is_service_business": [true/false - whether this is a service/management business],
   "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Non-Service Business" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
-  "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: null],
+  "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: 0],
   "confidence_scores": {
     "Integrator - Commercial A/V": [Integer from 1-100, only relevant if is_service_business=true],
     "Integrator - Residential A/V": [Integer from 1-100, only relevant if is_service_business=true],
-    "Managed Service Provider": [Integer from 1-100, only relevant if is_service_business=true]
+    "Managed Service Provider": [Integer from 1-100, only relevant if is_service_business=true],
+    "Corporate IT": [0 if is_service_business=true, integer from 1-100 if is_service_business=false]
   },
   "llm_explanation": "A detailed explanation of your reasoning and classification process"
 }
@@ -421,12 +424,13 @@ Here are examples of correctly classified companies:"""
 IMPORTANT INSTRUCTIONS:
 1. You MUST follow the decision tree exactly as specified.
 2. For service businesses, provide DIFFERENT confidence scores for each category.
-3. For non-service businesses, all service-type confidence scores should be very low (1-10).
-4. Internal IT potential should only be scored for non-service businesses.
-5. Your llm_explanation must detail your decision process through each step.
-6. Mention specific evidence from the text that supports your classification.
-7. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as a Non-Service Business, not as an MSP.
-8. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
+3. For service businesses, the Corporate IT score MUST be 0.
+4. For non-service businesses, all service-type confidence scores should be very low (1-10).
+5. Internal IT potential should be 0 for service businesses and scored 1-100 for non-service businesses.
+6. Your llm_explanation must detail your decision process through each step.
+7. Mention specific evidence from the text that supports your classification.
+8. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as a Non-Service Business, not as an MSP.
+9. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
 
@@ -463,7 +467,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 confidence = int(classification.get('max_confidence', 0.8) * 100)
                 new_explanation += f"STEP 3: The company is a service business that provides services to other businesses\n\n"
                 new_explanation += f"STEP 4: Based on the service offerings described, this company is classified as a {predicted_class} with {confidence}% confidence\n\n"
-                new_explanation += f"STEP 5: Since this is classified as a service business, there is no need to assess the internal IT potential\n\n"
+                new_explanation += f"STEP 5: Since this is classified as a service business, the internal IT potential is set to 0/100\n\n"
             else:
                 it_potential = classification.get("internal_it_potential", 50)
                 new_explanation += f"STEP 3: The company is NOT a service/management business that provides ongoing IT or A/V services to clients\n\n"
@@ -497,11 +501,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "processing_status": 2,
                 "is_service_business": True,
                 "predicted_class": "Managed Service Provider",
-                "internal_it_potential": None,
+                "internal_it_potential": 0,  # Set to 0 instead of None
                 "confidence_scores": {
                     "Managed Service Provider": 85,
                     "Integrator - Commercial A/V": 8,
-                    "Integrator - Residential A/V": 5
+                    "Integrator - Residential A/V": 5,
+                    "Corporate IT": 0  # Include Corporate IT with 0 score
                 },
                 "llm_explanation": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management. They provide managed hosting services for UniFi Controller, UISP, and other network management software, which is a clear indication they are a Managed Service Provider focused on network infrastructure management.",
                 "detection_method": "domain_override",
@@ -549,7 +554,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
                         "Integrator - Residential A/V": 2,
-                        "Corporate IT": 35  # Add Corporate IT score
+                        "Corporate IT": 35  # Add Corporate IT score based on internal IT potential
                     },
                     "llm_explanation": f"{domain} appears to be a travel/vacation related business, not an IT or A/V service provider. The website focuses on accommodations, bookings, or vacation rentals rather than technology services or integration. This type of business might have minimal internal IT needs depending on its size.",
                     "detection_method": "domain_override",
@@ -575,7 +580,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
                         "Integrator - Residential A/V": 2,
-                        "Corporate IT": 60  # Add Corporate IT score
+                        "Corporate IT": 60  # Add Corporate IT score based on internal IT potential
                     },
                     "llm_explanation": f"{domain} appears to be a transportation and logistics company, not an IT or A/V service provider. The website focuses on shipping, transportation, and logistics services rather than technology services or integration. This type of company typically has moderate internal IT needs to manage their operations and fleet management systems.",
                     "detection_method": "domain_override",
@@ -667,11 +672,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "processing_status": 0,
             "is_service_business": None,
             "predicted_class": "Process Did Not Complete",  # Always ensure a valid string
-            "internal_it_potential": None,
+            "internal_it_potential": 0,  # Set to 0 instead of None
             "confidence_scores": {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Integrator - Residential A/V": 0,
+                "Corporate IT": 0  # Include Corporate IT with score 0
             },
             "llm_explanation": f"Classification process for {domain_name} could not be completed. This may be due to connection issues, invalid domain, or other technical problems.",
             "detection_method": "process_failed",
@@ -695,11 +701,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             "processing_status": 1,
             "is_service_business": None,
             "predicted_class": "Parked Domain",  # Always a valid string
-            "internal_it_potential": None,
+            "internal_it_potential": 0,  # Set to 0 instead of None
             "confidence_scores": {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Integrator - Residential A/V": 0,
+                "Corporate IT": 0  # Include Corporate IT with score 0
             },
             "llm_explanation": f"{domain_name} appears to be a parked or inactive domain. No business-specific content was found to determine the company type. This may be a domain that is reserved but not yet in use, for sale, or simply under construction.",
             "detection_method": "parked_domain_detection",
@@ -824,11 +831,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # This is a parked domain, no further validation needed
             classification["is_service_business"] = None
             classification["predicted_class"] = "Parked Domain"
-            classification["internal_it_potential"] = None
+            classification["internal_it_potential"] = 0  # Set to 0 instead of None
             classification["confidence_scores"] = {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Integrator - Residential A/V": 0,
+                "Corporate IT": 0  # Add Corporate IT with 0 score
             }
             classification["max_confidence"] = 0.0
             classification["low_confidence"] = True
@@ -840,11 +848,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Process did not complete, no further validation needed
             classification["is_service_business"] = None
             classification["predicted_class"] = "Process Did Not Complete"
-            classification["internal_it_potential"] = None
+            classification["internal_it_potential"] = 0  # Set to 0 instead of None
             classification["confidence_scores"] = {
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
-                "Integrator - Residential A/V": 0
+                "Integrator - Residential A/V": 0,
+                "Corporate IT": 0  # Add Corporate IT with 0 score
             }
             classification["max_confidence"] = 0.0
             classification["low_confidence"] = True
@@ -903,7 +912,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 classification["confidence_scores"] = {
                     "Managed Service Provider": 50,
                     "Integrator - Commercial A/V": 25,
-                    "Integrator - Residential A/V": 15
+                    "Integrator - Residential A/V": 15,
+                    "Corporate IT": 0  # Add Corporate IT with 0 score
                 }
             else:
                 classification["confidence_scores"] = {
@@ -915,11 +925,11 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         if "internal_it_potential" not in classification:
             logger.warning("Missing internal_it_potential in classification, using fallback")
             if is_service:
-                classification["internal_it_potential"] = None
+                classification["internal_it_potential"] = 0  # Set to 0 instead of None
             else:
                 # Default middle value for unknown
                 classification["internal_it_potential"] = 50
-            
+        
         if "llm_explanation" not in classification or not classification["llm_explanation"]:
             logger.warning("Missing llm_explanation in classification, using fallback")
             if is_service:
@@ -959,9 +969,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Add Corporate IT score based on internal_it_potential
             it_potential = classification.get("internal_it_potential", 50)
             confidence_scores["Corporate IT"] = it_potential
+        else:
+            # Add Corporate IT score with value 0 for service businesses
+            confidence_scores["Corporate IT"] = 0
                 
         # For service businesses, ensure scores are differentiated
-        elif is_service and (len(set(confidence_scores.values())) <= 1 or 
+        if is_service and (len(set(confidence_scores.values())) <= 1 or 
                             max(confidence_scores.values()) - min(confidence_scores.values()) < 5):
             logger.warning("Confidence scores not sufficiently differentiated for service business, adjusting them")
             
@@ -972,24 +985,27 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 confidence_scores = {
                     "Managed Service Provider": 80,
                     "Integrator - Commercial A/V": 15,
-                    "Integrator - Residential A/V": 5
+                    "Integrator - Residential A/V": 5,
+                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
                 }
             elif pred_class == "Integrator - Commercial A/V":
                 confidence_scores = {
                     "Integrator - Commercial A/V": 80,
                     "Managed Service Provider": 15,
-                    "Integrator - Residential A/V": 5
+                    "Integrator - Residential A/V": 5,
+                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
                 }
             else:  # Residential A/V
                 confidence_scores = {
                     "Integrator - Residential A/V": 80,
                     "Integrator - Commercial A/V": 15,
-                    "Managed Service Provider": 5
+                    "Managed Service Provider": 5,
+                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
                 }
         
         # For service businesses, ensure predicted class matches highest confidence category
         if is_service:
-            highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
+            highest_category = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
             if classification["predicted_class"] != highest_category:
                 logger.warning(f"Predicted class {classification['predicted_class']} doesn't match highest confidence category {highest_category}, fixing")
                 classification["predicted_class"] = highest_category
@@ -1100,6 +1116,9 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     internal_it_potential = 30  # Default low-medium
                     
                 logger.info(f"Estimated internal IT potential: {internal_it_potential}")
+        else:
+            # For service businesses, internal IT potential is always 0
+            internal_it_potential = 0
                 
         # Calculate confidence scores
         confidence_scores = {}
@@ -1120,13 +1139,14 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             confidence_scores = {
                 "Managed Service Provider": int(msp_conf * 100),
                 "Integrator - Commercial A/V": int(comm_conf * 100),
-                "Integrator - Residential A/V": int(resi_conf * 100)
+                "Integrator - Residential A/V": int(resi_conf * 100),
+                "Corporate IT": 0  # Service businesses always have 0 for Corporate IT
             }
             
             # Ensure predicted class has highest confidence
             if predicted_class in confidence_scores:
-                highest_score = max(confidence_scores.values())
-                confidence_scores[predicted_class] = max(confidence_scores[predicted_class], highest_score + 5)
+                highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
+                confidence_scores[predicted_class] = max(confidence_scores[predicted_class], confidence_scores[highest_score] + 5)
         else:
             # Low confidence scores for all service categories
             confidence_scores = {
@@ -1218,20 +1238,20 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         
         if is_service:
             if predicted_class == "Managed Service Provider":
-                return f"{domain_name} appears to be a Managed Service Provider (MSP) based on the available evidence. The content suggests a focus on IT services, technical support, and technology management for business clients. MSPs typically provide services like network management, cybersecurity, cloud solutions, and IT infrastructure support."
+                return f"{domain_name} appears to be a Managed Service Provider (MSP) based on the available evidence. The content suggests a focus on IT services, technical support, and technology management for business clients. MSPs typically provide services like network management, cybersecurity, cloud solutions, and IT infrastructure support. Since this is a service business, the internal IT potential is set to 0/100."
                 
             elif predicted_class == "Integrator - Commercial A/V":
-                return f"{domain_name} appears to be a Commercial A/V Integrator based on the available evidence. The content suggests a focus on designing and implementing audiovisual solutions for businesses, such as conference rooms, digital signage, and professional audio systems for commercial environments."
+                return f"{domain_name} appears to be a Commercial A/V Integrator based on the available evidence. The content suggests a focus on designing and implementing audiovisual solutions for businesses, such as conference rooms, digital signage, and professional audio systems for commercial environments. Since this is a service business, the internal IT potential is set to 0/100."
                 
             elif predicted_class == "Integrator - Residential A/V":
-                return f"{domain_name} appears to be a Residential A/V Integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and audiovisual systems for residential clients, such as home theaters and whole-house audio solutions."
+                return f"{domain_name} appears to be a Residential A/V Integrator based on the available evidence. The content suggests a focus on home automation, smart home technology, and audiovisual systems for residential clients, such as home theaters and whole-house audio solutions. Since this is a service business, the internal IT potential is set to 0/100."
         else:
             # Non-service business explanation
             if internal_it_potential is not None:
                 it_level = "significant" if internal_it_potential > 70 else \
                            "moderate" if internal_it_potential > 40 else "minimal"
                            
-                return f"{domain_name} does not appear to be a service business in the IT or A/V integration space. It is not providing managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a business that might have {it_level} internal IT needs of its own."
+                return f"{domain_name} does not appear to be a service business in the IT or A/V integration space. It is not providing managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a business that might have {it_level} internal IT needs of its own. The internal IT potential is assessed at {internal_it_potential}/100."
             else:
                 return f"{domain_name} does not appear to be a service business in the IT or A/V integration space. There's no evidence that it provides managed services, IT support, or audio/visual integration to clients."
             
@@ -1273,7 +1293,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 logger.info(f"Domain name indicates vacation/travel business (non-service): {domain}")
                 
             # Special case for transportation/logistics
-            transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery"]
+            transport_terms = ["trucking", "transport", "logistics", "shipping", "freight",
+transport_terms = ["trucking", "transport", "logistics", "shipping", "freight", "delivery"]
             if any(term in domain_lower for term in transport_terms):
                 is_service = False
                 logger.info(f"Domain name indicates transportation/logistics business (non-service): {domain}")
@@ -1375,11 +1396,14 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Convert decimal confidence to 1-100 range
             confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
             
+            # Add Corporate IT with score 0 for service businesses
+            confidence_scores["Corporate IT"] = 0
+            
             return {
                 "processing_status": 2,  # Success
                 "is_service_business": True,
                 "predicted_class": predicted_class,
-                "internal_it_potential": None,
+                "internal_it_potential": 0,  # Set to 0 for service businesses
                 "confidence_scores": confidence_scores,
                 "llm_explanation": explanation,
                 "detection_method": "fallback",
@@ -1478,40 +1502,42 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         
         # Make sure predicted class has the highest score
         if predicted_class in confidence_scores:
-            highest_score = max(confidence_scores.values())
-            highest_category = max(confidence_scores.items(), key=lambda x: x[1])[0]
+            highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
             
-            if highest_category != predicted_class:
-                logger.warning(f"Predicted class {predicted_class} doesn't match highest confidence {highest_category}, adjusting")
+            if highest_score != predicted_class:
+                logger.warning(f"Predicted class {predicted_class} doesn't match highest confidence {highest_score}, adjusting")
                 # Find current score of predicted class
                 current_score = confidence_scores[predicted_class]
                 # Boost it above the highest
-                confidence_scores[predicted_class] = highest_score + 5
+                confidence_scores[predicted_class] = confidence_scores[highest_score] + 5
                 
         # Make sure scores are differentiated
-        score_values = list(confidence_scores.values())
-        if len(set(score_values)) <= 1 or max(score_values) - min(score_values) < 5:
+        service_scores = {k: v for k, v in confidence_scores.items() if k != "Corporate IT"}
+        if len(set(service_scores.values())) <= 1 or max(service_scores.values()) - min(service_scores.values()) < 5:
             logger.warning("Confidence scores not differentiated enough, adjusting")
             
             # Set up differentiated scores
             if predicted_class == "Managed Service Provider":
-                confidence_scores = {
+                confidence_scores.update({
                     "Managed Service Provider": 80,
                     "Integrator - Commercial A/V": 15,
                     "Integrator - Residential A/V": 5
-                }
+                })
             elif predicted_class == "Integrator - Commercial A/V":
-                confidence_scores = {
+                confidence_scores.update({
                     "Integrator - Commercial A/V": 80,
                     "Managed Service Provider": 15,
                     "Integrator - Residential A/V": 5
-                }
+                })
             else:  # Residential A/V
-                confidence_scores = {
+                confidence_scores.update({
                     "Integrator - Residential A/V": 80,
                     "Integrator - Commercial A/V": 15,
                     "Managed Service Provider": 5
-                }
+                })
+                
+        # Ensure Corporate IT is set to 0 for service businesses
+        confidence_scores["Corporate IT"] = 0
                 
         # Update classification
         classification["confidence_scores"] = confidence_scores
