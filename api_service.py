@@ -388,13 +388,14 @@ def create_error_result(domain, error_type=None, error_detail=None, email=None):
     error_result["explanation"] = explanation
     return error_result
 
+# [UPDATED FUNCTION] Fixed validate_result_consistency function
 def validate_result_consistency(result, domain):
     """
     Validate and ensure consistency between predicted_class, confidence scores, and explanation.
     
     Args:
         result (dict): The classification result
-        domain (str): The domain being processed
+        domain (str): The domain
         
     Returns:
         dict: The validated and consistent result
@@ -406,15 +407,24 @@ def validate_result_consistency(result, domain):
     if result.get("predicted_class") is None:
         # Extract a class from the explanation if possible
         explanation = result.get("explanation", "")
-        if "non-service business" in explanation.lower():
+        
+        # Look for existing company type in explanation
+        if "managed service provider" in explanation.lower() or "msp" in explanation.lower():
+            result["predicted_class"] = "Managed Service Provider"
+        elif "commercial a/v" in explanation.lower() or "commercial integrator" in explanation.lower():
+            result["predicted_class"] = "Integrator - Commercial A/V"
+        elif "residential a/v" in explanation.lower() or "residential integrator" in explanation.lower():
+            result["predicted_class"] = "Integrator - Residential A/V"
+        elif "non-service business" in explanation.lower() or "not a service" in explanation.lower():
             result["predicted_class"] = "Non-Service Business"
         elif "vacation rental" in explanation.lower() or "travel" in explanation.lower():
             result["predicted_class"] = "Non-Service Business"
-        elif "parked domain" in explanation.lower():
+        elif "parked domain" in explanation.lower() or "website is parked" in explanation.lower():
             result["predicted_class"] = "Parked Domain"
         else:
             # Default to Unknown
             result["predicted_class"] = "Unknown"
+            
         logger.warning(f"Fixed null predicted_class for {domain} to {result['predicted_class']}")
     
     # Check for cases where confidence score is very low for service businesses
@@ -436,6 +446,50 @@ def validate_result_consistency(result, domain):
                 "Integrator - Commercial A/V": 0,
                 "Integrator - Residential A/V": 0
             }
+    
+    # For Non-Service Business, ensure Corporate IT score is included
+    if result.get("predicted_class") == "Non-Service Business":
+        # Make sure we have confidence_scores
+        if "confidence_scores" not in result:
+            result["confidence_scores"] = {}
+            
+        # Add Corporate IT if not present
+        if "Corporate IT" not in result["confidence_scores"]:
+            # Try to extract IT potential from explanation
+            explanation = result.get("explanation", "")
+            it_potential = 60  # Default
+            
+            # Look for internal IT potential in explanation
+            it_match = re.search(r'internal IT.*?(\d+)[/\s]*100', explanation.lower())
+            if it_match:
+                try:
+                    it_potential = int(it_match.group(1))
+                except (ValueError, TypeError):
+                    pass
+            
+            # Update confidence scores
+            result["confidence_scores"]["Corporate IT"] = it_potential
+            result["confidence_scores"]["Managed Service Provider"] = 5
+            result["confidence_scores"]["Integrator - Commercial A/V"] = 3
+            result["confidence_scores"]["Integrator - Residential A/V"] = 2
+            
+            # Set overall confidence to 80% for non-service
+            result["confidence_score"] = 80
+    
+    # Fix step numbering if it's off (e.g. starting at 6 instead of 1)
+    explanation = result.get("explanation", "")
+    fixed_steps = []
+    step_pattern = re.compile(r'step\s*(\d+)[:\.]?\s*([^$]+?)(?=step\s*\d+[:\.]|$)', re.IGNORECASE | re.DOTALL)
+    matches = step_pattern.findall(explanation)
+    
+    if matches and int(matches[0][0]) > 5:  # If steps start higher than 5
+        # Renumber all steps to start from 1
+        for i, (_, content) in enumerate(matches, 1):
+            fixed_steps.append(f"STEP {i}: {content.strip()}")
+            
+        # Rebuild explanation with fixed step numbering
+        if fixed_steps:
+            result["explanation"] = "\n\n".join(fixed_steps)
     
     # Ensure explanation has step-by-step format if it's not a parked domain or process did not complete
     if (result.get("predicted_class") not in ["Parked Domain", "Process Did Not Complete", "Unknown"] 
@@ -498,13 +552,11 @@ def classify_domain():
     try:
         data = request.json
         input_value = data.get('url', '').strip()
-        force_reclassify = data.get('force_reclassify', False)
-        use_existing_content = data.get('use_existing_content', False)
         
-        # Always set force_reclassify to true for new requests unless explicitly using existing content
-        if request.method == 'POST' and 'use_existing_content' not in data:
-            # Set a default preference for fresh classification
-            force_reclassify = data.get('force_reclassify', True)
+        # [UPDATED] Change default for force_reclassify to True
+        force_reclassify = data.get('force_reclassify', True)  # Default to TRUE for consistent behavior
+        
+        use_existing_content = data.get('use_existing_content', False)
         
         if not input_value:
             return jsonify({"error": "URL or email is required"}), 400
@@ -544,143 +596,141 @@ def classify_domain():
         # Check for existing classification if not forcing reclassification
         if not force_reclassify:
             existing_record = snowflake_conn.check_existing_classification(domain)
+            
+            # [UPDATED SECTION] - Fixed cached results handling
             if existing_record:
-                # Log the full record for debugging
+                logger.info(f"Found existing classification for {domain}")
                 logger.info(f"Retrieved record from Snowflake: {existing_record}")
                 
-                # Check if confidence is below threshold for auto-reclassification
-                confidence_score = existing_record.get('confidence_score', 1.0)
-                if confidence_score < AUTO_RECLASSIFY_THRESHOLD:
-                    logger.info(f"Auto-reclassifying {domain} due to low confidence score: {confidence_score}")
-                    force_reclassify = True
-                else:
-                    logger.info(f"Found existing classification for {domain}")
-                    
-                    # Extract confidence scores
-                    confidence_scores = {}
+                # Extract confidence scores
+                confidence_scores = {}
+                try:
+                    confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+                except Exception as e:
+                    logger.warning(f"Could not parse all_scores: {str(e)}")
+                
+                # Extract LLM explanation directly from the LLM_EXPLANATION column
+                llm_explanation = existing_record.get('LLM_EXPLANATION', '')
+                
+                # If LLM_EXPLANATION is not available, try to get it from model_metadata
+                if not llm_explanation:
                     try:
-                        confidence_scores = json.loads(existing_record.get('all_scores', '{}'))
+                        metadata = json.loads(existing_record.get('model_metadata', '{}'))
+                        llm_explanation = metadata.get('llm_explanation', '')
                     except Exception as e:
-                        logger.warning(f"Could not parse all_scores for {domain}: {e}")
-                    
-                    # Extract LLM explanation directly from the LLM_EXPLANATION column
-                    llm_explanation = existing_record.get('LLM_EXPLANATION', '')
-                    
-                    # If LLM_EXPLANATION is not available, try to get it from model_metadata
-                    if not llm_explanation:
+                        logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+                
+                # Ensure we have an explanation
+                if not llm_explanation:
+                    llm_explanation = f"The domain {domain} was previously classified as a {existing_record.get('company_type')} based on analysis of website content."
+                
+                # Add low_confidence flag based on confidence score
+                confidence_score = existing_record.get('confidence_score', 0.5)
+                low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
+                
+                # Check if it's a parked domain (stored as "Parked Domain" in company_type)
+                is_parked = existing_record.get('company_type') == "Parked Domain"
+                
+                # Process confidence scores with type handling
+                processed_scores = {}
+                for category, score in confidence_scores.items():
+                    # Convert float 0-1 to int 1-100
+                    if isinstance(score, float) and score <= 1.0:
+                        processed_scores[category] = int(score * 100)
+                    # Already int in 1-100 range
+                    elif isinstance(score, (int, float)):
+                        processed_scores[category] = int(score)
+                    # String (somehow)
+                    else:
                         try:
-                            metadata = json.loads(existing_record.get('model_metadata', '{}'))
-                            llm_explanation = metadata.get('llm_explanation', '')
-                        except Exception as e:
-                            logger.warning(f"Could not parse model_metadata for {domain}: {e}")
-                    
-                    # Ensure we have an explanation
-                    if not llm_explanation:
-                        llm_explanation = f"The domain {domain} was previously classified as a {existing_record.get('company_type')} based on analysis of website content."
-                    
-                    # Add low_confidence flag based on confidence score
-                    low_confidence = existing_record.get('low_confidence', confidence_score < LOW_CONFIDENCE_THRESHOLD)
-                    
-                    # Check if it's a parked domain (stored as "Parked Domain" in company_type)
-                    is_parked = existing_record.get('company_type') == "Parked Domain"
-                    
-                    # Process confidence scores with type handling
-                    processed_scores = {}
-                    for category, score in confidence_scores.items():
-                        # Convert float 0-1 to int 1-100
-                        if isinstance(score, float) and score <= 1.0:
-                            processed_scores[category] = int(score * 100)
-                        # Already int in 1-100 range
-                        elif isinstance(score, (int, float)):
-                            processed_scores[category] = int(score)
-                        # String (somehow)
-                        else:
-                            try:
-                                score_float = float(score)
-                                if score_float <= 1.0:
-                                    processed_scores[category] = int(score_float * 100)
-                                else:
-                                    processed_scores[category] = int(score_float)
-                            except (ValueError, TypeError):
-                                # Default if conversion fails
-                                processed_scores[category] = 5
-                    
-                    # IMPORTANT - Only fix identical scores if all values are exactly the same
-                    # This prevents overriding valid confidence distributions
+                            score_float = float(score)
+                            if score_float <= 1.0:
+                                processed_scores[category] = int(score_float * 100)
+                            else:
+                                processed_scores[category] = int(score_float)
+                        except (ValueError, TypeError):
+                            # Default if conversion fails
+                            processed_scores[category] = 5
+                
+                # Get original predicted class from database 
+                orig_predicted_class = existing_record.get('company_type')
+                
+                # For service businesses, preserve original scores but ensure they're differentiated
+                if orig_predicted_class in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                    # Check if we need to fix identical scores
                     identical_values = len(set(processed_scores.values())) <= 1
                     all_values_zero = all(value == 0 for value in processed_scores.values())
-
+                    
                     if identical_values and not all_values_zero:
                         logger.warning("Cached response has identical confidence scores, fixing...")
-                        pred_class = existing_record.get('company_type')
-                        if pred_class == "Managed Service Provider":
+                        # Set up differentiated scores
+                        if orig_predicted_class == "Managed Service Provider":
                             processed_scores = {
-                                "Managed Service Provider": 80,
-                                "Integrator - Commercial A/V": 15,
-                                "Integrator - Residential A/V": 5
+                                "Managed Service Provider": 90,
+                                "Integrator - Commercial A/V": 10,
+                                "Integrator - Residential A/V": 10
                             }
-                        elif pred_class == "Integrator - Commercial A/V":
+                        elif orig_predicted_class == "Integrator - Commercial A/V":
                             processed_scores = {
-                                "Integrator - Commercial A/V": 80,
-                                "Managed Service Provider": 15,
-                                "Integrator - Residential A/V": 5
+                                "Integrator - Commercial A/V": 90,
+                                "Managed Service Provider": 10,
+                                "Integrator - Residential A/V": 10
                             }
-                        elif pred_class == "Integrator - Residential A/V":
+                        elif orig_predicted_class == "Integrator - Residential A/V":
                             processed_scores = {
-                                "Integrator - Residential A/V": 80,
-                                "Integrator - Commercial A/V": 15, 
-                                "Managed Service Provider": 5
+                                "Integrator - Residential A/V": 90,
+                                "Integrator - Commercial A/V": 10, 
+                                "Managed Service Provider": 10
                             }
-                        elif pred_class == "Non-Service Business":
-                            # For non-service business, add Corporate IT score
-                            internal_it_potential = existing_record.get('internal_it_potential', 50)
-                            if internal_it_potential is None:
-                                internal_it_potential = 50
-                                
-                            processed_scores = {
-                                "Managed Service Provider": 5,
-                                "Integrator - Commercial A/V": 3,
-                                "Integrator - Residential A/V": 2,
-                                "Corporate IT": internal_it_potential  # Add Corporate IT score
-                            }
-                            
-                    # Add Corporate IT score for Non-Service Business classifications if missing
-                    if existing_record.get('company_type') == "Non-Service Business" and "Corporate IT" not in processed_scores:
-                        # Try to extract internal IT potential from explanation or set a default
-                        it_potential = 50
-                        it_match = re.search(r'internal IT.*?(\d+)[/\s]*100', llm_explanation)
-                        if it_match:
+                
+                # For Non-Service Business, ensure Corporate IT score is included
+                elif orig_predicted_class == "Non-Service Business":
+                    # Try to extract internal IT potential from explanation or set a default
+                    it_potential = 60  # Default value
+                    it_match = re.search(r'internal IT.*?(\d+)[/\s]*100', llm_explanation)
+                    if it_match:
+                        try:
                             it_potential = int(it_match.group(1))
-                            
-                        processed_scores["Corporate IT"] = it_potential
-                        # Ensure service scores are low
-                        for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
-                            processed_scores[category] = min(processed_scores.get(category, 5), 10)
-                    
-                    # Return the cached classification
-                    result = {
-                        "domain": domain,
-                        "predicted_class": existing_record.get('company_type'),
-                        "confidence_score": int(existing_record.get('confidence_score', 0.5) * 100),
-                        "confidence_scores": processed_scores,
-                        "explanation": llm_explanation,  # Include the explanation here
-                        "low_confidence": low_confidence,
-                        "detection_method": existing_record.get('detection_method', 'api'),
-                        "source": "cached",
-                        "is_parked": is_parked
-                    }
-                    
-                    # Add email to response if input was an email
-                    if email:
-                        result["email"] = email
-                    
-                    # Ensure result consistency
-                    result = validate_result_consistency(result, domain)
-                    
-                    # Log the response for debugging
-                    logger.info(f"Sending response to client: {json.dumps(result)}")
+                        except (ValueError, TypeError):
+                            pass
                         
-                    return jsonify(result), 200
+                    # Add Corporate IT score
+                    processed_scores["Corporate IT"] = it_potential
+                    
+                    # Ensure service scores are low
+                    processed_scores["Managed Service Provider"] = min(processed_scores.get("Managed Service Provider", 5), 10)
+                    processed_scores["Integrator - Commercial A/V"] = min(processed_scores.get("Integrator - Commercial A/V", 3), 10)
+                    processed_scores["Integrator - Residential A/V"] = min(processed_scores.get("Integrator - Residential A/V", 2), 10)
+                
+                # Return the cached classification
+                result = {
+                    "domain": domain,
+                    "predicted_class": orig_predicted_class,  # Use original class directly
+                    "confidence_score": int(existing_record.get('confidence_score', 0.5) * 100),
+                    "confidence_scores": processed_scores,
+                    "explanation": llm_explanation,  # Include the explanation here
+                    "low_confidence": low_confidence,
+                    "detection_method": existing_record.get('detection_method', 'api'),
+                    "source": "cached",
+                    "is_parked": is_parked
+                }
+                
+                # Add email to response if input was an email
+                if email:
+                    result["email"] = email
+                
+                # Ensure result consistency
+                result = validate_result_consistency(result, domain)
+                
+                # Set proper confidence score for service businesses based on category score
+                if result["predicted_class"] in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                    if result["predicted_class"] in result["confidence_scores"]:
+                        result["confidence_score"] = result["confidence_scores"][result["predicted_class"]]
+                
+                # Log the response for debugging
+                logger.info(f"Sending response to client: {json.dumps(result)}")
+                    
+                return jsonify(result), 200
         
         # Try to get content (either from DB or by crawling)
         content = None
@@ -718,7 +768,7 @@ def classify_domain():
                 
             return jsonify(error_result), 404
         
-        # If no content yet and we're not using existing content or existing content wasn't found, crawl the website
+        # If no content yet and we're not using existing content, crawl the website
         error_type = None
         error_detail = None
         
@@ -796,6 +846,8 @@ def classify_domain():
                 "is_parked": True
             }
         else:
+            # [UPDATED SECTION] - Fixed Fresh Classification Handling
+            
             # Normal case with confidence scores as integers (1-100)
             # Get max confidence 
             max_confidence = 0
@@ -841,21 +893,21 @@ def classify_domain():
                 pred_class = classification.get('predicted_class')
                 if pred_class == "Managed Service Provider":
                     processed_scores = {
-                        "Managed Service Provider": 80,
-                        "Integrator - Commercial A/V": 15,
-                        "Integrator - Residential A/V": 5
+                        "Managed Service Provider": 90,
+                        "Integrator - Commercial A/V": 10,
+                        "Integrator - Residential A/V": 10
                     }
                 elif pred_class == "Integrator - Commercial A/V":
                     processed_scores = {
-                        "Integrator - Commercial A/V": 80,
-                        "Managed Service Provider": 15,
-                        "Integrator - Residential A/V": 5
+                        "Integrator - Commercial A/V": 90,
+                        "Managed Service Provider": 10,
+                        "Integrator - Residential A/V": 10
                     }
                 elif pred_class == "Integrator - Residential A/V":  # Residential A/V
                     processed_scores = {
-                        "Integrator - Residential A/V": 80,
-                        "Integrator - Commercial A/V": 15, 
-                        "Managed Service Provider": 5
+                        "Integrator - Residential A/V": 90,
+                        "Integrator - Commercial A/V": 10, 
+                        "Managed Service Provider": 10
                     }
                 elif pred_class == "Process Did Not Complete":
                     # Set all scores to 0 for process_did_not_complete
@@ -868,9 +920,9 @@ def classify_domain():
                     max_confidence = 0
                 elif pred_class == "Non-Service Business":
                     # For non-service business, add Corporate IT score
-                    internal_it_potential = classification.get('internal_it_potential', 50)
+                    internal_it_potential = classification.get('internal_it_potential', 60)
                     if internal_it_potential is None:
-                        internal_it_potential = 50
+                        internal_it_potential = 60
                         
                     processed_scores = {
                         "Managed Service Provider": 5,
@@ -881,7 +933,7 @@ def classify_domain():
                 
                 # Update max_confidence to match the new highest value if not Process Did Not Complete
                 if pred_class not in ["Process Did Not Complete", "Non-Service Business"]:
-                    max_confidence = 80
+                    max_confidence = 90
                     
             # Ensure explanation exists
             explanation = classification.get('llm_explanation', '')
@@ -894,17 +946,22 @@ def classify_domain():
                     logger.info(f"Correcting classification for {domain} to Non-Service Business based on explanation")
                     classification['predicted_class'] = "Non-Service Business"
 
-            # Add Corporate IT for Non-Service Business if not already present
-            if classification.get('predicted_class') == "Non-Service Business" and "Corporate IT" not in processed_scores:
-                internal_it_potential = classification.get('internal_it_potential', 50)
-                if internal_it_potential is None:
-                    internal_it_potential = 50
-                    
-                processed_scores["Corporate IT"] = internal_it_potential
-                # Ensure service scores are low
-                for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
-                    processed_scores[category] = min(processed_scores.get(category, 5), 10)
-            
+            # For Non-Service Business, ensure Corporate IT score is included
+            if classification.get('predicted_class') == "Non-Service Business":
+                # Add Corporate IT for Non-Service Business if not already present
+                if "Corporate IT" not in processed_scores:
+                    internal_it_potential = classification.get('internal_it_potential', 60)
+                    if internal_it_potential is None:
+                        internal_it_potential = 60
+                        
+                    processed_scores["Corporate IT"] = internal_it_potential
+                    # Ensure service scores are low
+                    for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                        processed_scores[category] = min(processed_scores.get(category, 5), 10)
+                
+                # Set confidence score to a consistent value for non-service business
+                max_confidence = 80
+                
             result = {
                 "domain": domain,
                 "predicted_class": classification.get('predicted_class'),
