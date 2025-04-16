@@ -418,7 +418,8 @@ def validate_result_consistency(result, domain):
         logger.warning(f"Fixed null predicted_class for {domain} to {result['predicted_class']}")
     
     # Check for cases where confidence score is very low for service businesses
-    if "confidence_score" in result and result["confidence_score"] <= 15:
+    # Only do this for fresh classifications, not cached ones
+    if "confidence_score" in result and result["confidence_score"] <= 15 and result.get("source") != "cached":
         explanation = result.get("explanation", "").lower()
         if "non-service business" in explanation or "not a service" in explanation:
             if result["predicted_class"] in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
@@ -604,8 +605,12 @@ def classify_domain():
                                 # Default if conversion fails
                                 processed_scores[category] = 5
                     
-                    # Final validation - ensure cached scores are different
-                    if len(set(processed_scores.values())) <= 1:
+                    # IMPORTANT - Only fix identical scores if all values are exactly the same
+                    # This prevents overriding valid confidence distributions
+                    identical_values = len(set(processed_scores.values())) <= 1
+                    all_values_zero = all(value == 0 for value in processed_scores.values())
+
+                    if identical_values and not all_values_zero:
                         logger.warning("Cached response has identical confidence scores, fixing...")
                         pred_class = existing_record.get('company_type')
                         if pred_class == "Managed Service Provider":
@@ -620,12 +625,37 @@ def classify_domain():
                                 "Managed Service Provider": 15,
                                 "Integrator - Residential A/V": 5
                             }
-                        else:  # Assume Residential A/V
+                        elif pred_class == "Integrator - Residential A/V":
                             processed_scores = {
                                 "Integrator - Residential A/V": 80,
                                 "Integrator - Commercial A/V": 15, 
                                 "Managed Service Provider": 5
                             }
+                        elif pred_class == "Non-Service Business":
+                            # For non-service business, add Corporate IT score
+                            internal_it_potential = existing_record.get('internal_it_potential', 50)
+                            if internal_it_potential is None:
+                                internal_it_potential = 50
+                                
+                            processed_scores = {
+                                "Managed Service Provider": 5,
+                                "Integrator - Commercial A/V": 3,
+                                "Integrator - Residential A/V": 2,
+                                "Corporate IT": internal_it_potential  # Add Corporate IT score
+                            }
+                            
+                    # Add Corporate IT score for Non-Service Business classifications if missing
+                    if existing_record.get('company_type') == "Non-Service Business" and "Corporate IT" not in processed_scores:
+                        # Try to extract internal IT potential from explanation or set a default
+                        it_potential = 50
+                        it_match = re.search(r'internal IT.*?(\d+)[/\s]*100', llm_explanation)
+                        if it_match:
+                            it_potential = int(it_match.group(1))
+                            
+                        processed_scores["Corporate IT"] = it_potential
+                        # Ensure service scores are low
+                        for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                            processed_scores[category] = min(processed_scores.get(category, 5), 10)
                     
                     # Return the cached classification
                     result = {
@@ -836,11 +866,23 @@ def classify_domain():
                     }
                     # Reset max_confidence to 0.0
                     max_confidence = 0
+                elif pred_class == "Non-Service Business":
+                    # For non-service business, add Corporate IT score
+                    internal_it_potential = classification.get('internal_it_potential', 50)
+                    if internal_it_potential is None:
+                        internal_it_potential = 50
+                        
+                    processed_scores = {
+                        "Managed Service Provider": 5,
+                        "Integrator - Commercial A/V": 3,
+                        "Integrator - Residential A/V": 2,
+                        "Corporate IT": internal_it_potential  # Add Corporate IT score
+                    }
                 
                 # Update max_confidence to match the new highest value if not Process Did Not Complete
-                if pred_class != "Process Did Not Complete":
+                if pred_class not in ["Process Did Not Complete", "Non-Service Business"]:
                     max_confidence = 80
-            
+                    
             # Ensure explanation exists
             explanation = classification.get('llm_explanation', '')
             if not explanation:
@@ -851,7 +893,18 @@ def classify_domain():
                 if max_confidence <= 20:  # Only override if confidence is low
                     logger.info(f"Correcting classification for {domain} to Non-Service Business based on explanation")
                     classification['predicted_class'] = "Non-Service Business"
-                
+
+            # Add Corporate IT for Non-Service Business if not already present
+            if classification.get('predicted_class') == "Non-Service Business" and "Corporate IT" not in processed_scores:
+                internal_it_potential = classification.get('internal_it_potential', 50)
+                if internal_it_potential is None:
+                    internal_it_potential = 50
+                    
+                processed_scores["Corporate IT"] = internal_it_potential
+                # Ensure service scores are low
+                for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V"]:
+                    processed_scores[category] = min(processed_scores.get(category, 5), 10)
+            
             result = {
                 "domain": domain,
                 "predicted_class": classification.get('predicted_class'),
