@@ -114,7 +114,7 @@ class LLMClassifier:
             "Managed Service Provider": [],
             "Integrator - Commercial A/V": [],
             "Integrator - Residential A/V": [],
-            "Non-Service Business": []  # New category for non-service examples
+            "Internal IT Department": []  # Changed from "Non-Service Business"
         }
         
         try:
@@ -132,6 +132,10 @@ class LLMClassifier:
                         reader = csv.DictReader(f)
                         for row in reader:
                             company_type = row.get('company_type', '')
+                            # Handle the old name if it still exists in CSV
+                            if company_type == "Non-Service Business":
+                                company_type = "Internal IT Department"
+                                
                             if company_type in examples:
                                 examples[company_type].append({
                                     'domain': row.get('domain', ''),
@@ -151,6 +155,10 @@ class LLMClassifier:
                     for row in reader:
                         if len(row) >= 3:  # domain, company_type, content
                             company_type = row[1]
+                            # Handle the old name if it still exists in CSV
+                            if company_type == "Non-Service Business":
+                                company_type = "Internal IT Department"
+                                
                             if company_type in examples:
                                 examples[company_type].append({
                                     'domain': row[0],
@@ -184,7 +192,7 @@ class LLMClassifier:
                         'domain': 'example-residential-av.com',
                         'content': 'We specialize in smart home automation and high-end home theater installations for residential clients, including lighting control, whole-home audio, and custom home cinema rooms. Our team creates extraordinary entertainment experiences in luxury homes.'
                     })
-                else:  # Non-Service Business
+                else:  # Internal IT Department (formerly Non-Service Business)
                     examples[category].append({
                         'domain': 'example-nonservice.com',
                         'content': 'We are an online retailer selling consumer electronics and accessories. Browse our wide selection of products for your home and office needs. Shop now for great deals on computers, phones, and entertainment gadgets with fast shipping to your door.'
@@ -387,18 +395,18 @@ STEP 5: If it is NOT a service business, determine if it's a business that could
 - Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, etc.
 
 IMPORTANT GUIDELINES:
-- Service businesses should have a Corporate IT score of 0 (as they are providing services, not consuming IT internally)
-- Non-service businesses should have a Corporate IT score between 1-100 indicating their internal IT potential
+- Service businesses should have a Internal IT Department score of 0 (as they are providing services, not consuming IT internally)
+- Non-service businesses should have a Internal IT Department score between 1-100 indicating their internal IT potential
 - Vacation rental services, travel agencies, and hospitality businesses are NOT A/V Integrators
 - Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer IT services
 - Media production companies are NOT necessarily A/V integrators
 - Purely online retailers or e-commerce sites generally don't provide services and are NOT MSPs
-- Transportation and logistics companies are NOT service providers in the IT sense and should be classified as Non-Service Business
+- Transportation and logistics companies are NOT service providers in the IT sense and should be classified as Internal IT Department
 
 Here are examples of correctly classified companies:"""
 
         # Add examples to the system prompt
-        for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V", "Non-Service Business"]:
+        for category in ["Managed Service Provider", "Integrator - Commercial A/V", "Integrator - Residential A/V", "Internal IT Department"]:
             if category in examples and examples[category]:
                 system_prompt += f"\n\n## {category} examples:\n"
                 for example in examples[category][:2]:  # Just use 2 examples per category
@@ -410,13 +418,13 @@ Here are examples of correctly classified companies:"""
 {
   "processing_status": [0 if processing failed, 1 if domain is parked, 2 if classification successful],
   "is_service_business": [true/false - whether this is a service/management business],
-  "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Non-Service Business" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
+  "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Internal IT Department" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
   "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: 0],
   "confidence_scores": {
     "Integrator - Commercial A/V": [Integer from 1-100, only relevant if is_service_business=true],
     "Integrator - Residential A/V": [Integer from 1-100, only relevant if is_service_business=true],
     "Managed Service Provider": [Integer from 1-100, only relevant if is_service_business=true],
-    "Corporate IT": [0 if is_service_business=true, integer from 1-100 if is_service_business=false]
+    "Internal IT Department": [0 if is_service_business=true, integer from 1-100 if is_service_business=false]
   },
   "llm_explanation": "A detailed explanation of your reasoning and classification process"
 }
@@ -424,12 +432,12 @@ Here are examples of correctly classified companies:"""
 IMPORTANT INSTRUCTIONS:
 1. You MUST follow the decision tree exactly as specified.
 2. For service businesses, provide DIFFERENT confidence scores for each category.
-3. For service businesses, the Corporate IT score MUST be 0.
+3. For service businesses, the Internal IT Department score MUST be 0.
 4. For non-service businesses, all service-type confidence scores should be very low (1-10).
 5. Internal IT potential should be 0 for service businesses and scored 1-100 for non-service businesses.
 6. Your llm_explanation must detail your decision process through each step.
 7. Mention specific evidence from the text that supports your classification.
-8. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as a Non-Service Business, not as an MSP.
+8. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as Internal IT Department, not as an MSP.
 9. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
@@ -471,7 +479,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             else:
                 it_potential = classification.get("internal_it_potential", 50)
                 new_explanation += f"STEP 3: The company is NOT a service/management business that provides ongoing IT or A/V services to clients\n\n"
-                new_explanation += f"STEP 4: Since this is not a service business, we classify it as {predicted_class}\n\n"
+                new_explanation += f"STEP 4: Since this is not a service business, we classify it as Internal IT Department\n\n"
                 new_explanation += f"STEP 5: As a non-service business, we assess its internal IT potential at {it_potential}/100\n\n"
                 
             # Include the original explanation as a summary
@@ -501,12 +509,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "processing_status": 2,
                 "is_service_business": True,
                 "predicted_class": "Managed Service Provider",
-                "internal_it_potential": 0,  # Set to 0 instead of None
+                "internal_it_potential": 0,
                 "confidence_scores": {
                     "Managed Service Provider": 85,
                     "Integrator - Commercial A/V": 8,
                     "Integrator - Residential A/V": 5,
-                    "Corporate IT": 0  # Include Corporate IT with 0 score
+                    "Internal IT Department": 0  # Include Internal IT Department with 0 score
                 },
                 "llm_explanation": f"{domain} is a cloud hosting platform specializing in Ubiquiti network management. They provide managed hosting services for UniFi Controller, UISP, and other network management software, which is a clear indication they are a Managed Service Provider focused on network infrastructure management.",
                 "detection_method": "domain_override",
@@ -520,13 +528,13 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             return {
                 "processing_status": 2,
                 "is_service_business": False,
-                "predicted_class": "Non-Service Business",
+                "predicted_class": "Internal IT Department",  # Changed from "Non-Service Business"
                 "internal_it_potential": 40,
                 "confidence_scores": {
                     "Managed Service Provider": 5,
                     "Integrator - Commercial A/V": 3,
                     "Integrator - Residential A/V": 2,
-                    "Corporate IT": 40  # Add Corporate IT score
+                    "Internal IT Department": 40  # Add Internal IT Department score based on internal IT potential
                 },
                 "llm_explanation": f"{domain} appears to be a vacation rental/travel booking website offering holiday accommodations in various destinations. This is not a service business in the IT or A/V integration space. It's a travel industry business that might have a small internal IT department to maintain their booking systems and website.",
                 "detection_method": "domain_override",
@@ -548,13 +556,13 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 return {
                     "processing_status": 2,
                     "is_service_business": False,
-                    "predicted_class": "Non-Service Business",
+                    "predicted_class": "Internal IT Department",  # Changed from "Non-Service Business"
                     "internal_it_potential": 35,
                     "confidence_scores": {
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
                         "Integrator - Residential A/V": 2,
-                        "Corporate IT": 35  # Add Corporate IT score based on internal IT potential
+                        "Internal IT Department": 35  # Changed from "Corporate IT"
                     },
                     "llm_explanation": f"{domain} appears to be a travel/vacation related business, not an IT or A/V service provider. The website focuses on accommodations, bookings, or vacation rentals rather than technology services or integration. This type of business might have minimal internal IT needs depending on its size.",
                     "detection_method": "domain_override",
@@ -574,13 +582,13 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 return {
                     "processing_status": 2,
                     "is_service_business": False,
-                    "predicted_class": "Non-Service Business",
+                    "predicted_class": "Internal IT Department",  # Changed from "Non-Service Business"
                     "internal_it_potential": 60,
                     "confidence_scores": {
                         "Managed Service Provider": 5,
                         "Integrator - Commercial A/V": 3,
                         "Integrator - Residential A/V": 2,
-                        "Corporate IT": 60  # Add Corporate IT score based on internal IT potential
+                        "Internal IT Department": 60  # Changed from "Corporate IT"
                     },
                     "llm_explanation": f"{domain} appears to be a transportation and logistics company, not an IT or A/V service provider. The website focuses on shipping, transportation, and logistics services rather than technology services or integration. This type of company typically has moderate internal IT needs to manage their operations and fleet management systems.",
                     "detection_method": "domain_override",
@@ -677,7 +685,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
                 "Integrator - Residential A/V": 0,
-                "Corporate IT": 0  # Include Corporate IT with score 0
+                "Internal IT Department": 0  # Include Internal IT Department with 0 score
             },
             "llm_explanation": f"Classification process for {domain_name} could not be completed. This may be due to connection issues, invalid domain, or other technical problems.",
             "detection_method": "process_failed",
@@ -706,7 +714,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
                 "Integrator - Residential A/V": 0,
-                "Corporate IT": 0  # Include Corporate IT with score 0
+                "Internal IT Department": 0  # Include Internal IT Department with 0 score
             },
             "llm_explanation": f"{domain_name} appears to be a parked or inactive domain. No business-specific content was found to determine the company type. This may be a domain that is reserved but not yet in use, for sale, or simply under construction.",
             "detection_method": "parked_domain_detection",
@@ -836,7 +844,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
                 "Integrator - Residential A/V": 0,
-                "Corporate IT": 0  # Add Corporate IT with 0 score
+                "Internal IT Department": 0  # Include Internal IT Department with 0 score
             }
             classification["max_confidence"] = 0.0
             classification["low_confidence"] = True
@@ -853,7 +861,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": 0,
                 "Integrator - Commercial A/V": 0,
                 "Integrator - Residential A/V": 0,
-                "Corporate IT": 0  # Add Corporate IT with 0 score
+                "Internal IT Department": 0  # Include Internal IT Department with 0 score
             }
             classification["max_confidence"] = 0.0
             classification["low_confidence"] = True
@@ -866,11 +874,11 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Check explanation for clues about what type of business this is
             explanation = classification.get("llm_explanation", "").lower()
             if "non-service business" in explanation or "not a service" in explanation:
-                classification["predicted_class"] = "Non-Service Business"
+                classification["predicted_class"] = "Internal IT Department"  # Changed from "Non-Service Business"
             elif "travel" in explanation or "vacation" in explanation or "rental" in explanation:
-                classification["predicted_class"] = "Non-Service Business"
+                classification["predicted_class"] = "Internal IT Department"  # Changed from "Non-Service Business"
             elif "transport" in explanation or "logistics" in explanation or "shipping" in explanation:
-                classification["predicted_class"] = "Non-Service Business"
+                classification["predicted_class"] = "Internal IT Department"  # Changed from "Non-Service Business"
             else:
                 classification["predicted_class"] = "Unknown"
             
@@ -892,9 +900,9 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             highest_score = max(classification["confidence_scores"].values())
             if highest_score <= 15:
                 # This is likely not actually a service business
-                logger.warning(f"Very low confidence ({highest_score}) for service classification, recategorizing as Non-Service Business")
+                logger.warning(f"Very low confidence ({highest_score}) for service classification, recategorizing as Internal IT Department")
                 classification["is_service_business"] = False
-                classification["predicted_class"] = "Non-Service Business"
+                classification["predicted_class"] = "Internal IT Department"  # Changed from "Non-Service Business"
                 is_service = False
                 
                 # Set appropriate internal IT potential
@@ -913,7 +921,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "Managed Service Provider": 50,
                     "Integrator - Commercial A/V": 25,
                     "Integrator - Residential A/V": 15,
-                    "Corporate IT": 0  # Add Corporate IT with 0 score
+                    "Internal IT Department": 0  # Include Internal IT Department with 0 score
                 }
             else:
                 classification["confidence_scores"] = {
@@ -966,12 +974,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             if classification["internal_it_potential"] is not None:
                 classification["internal_it_potential"] = int(classification["internal_it_potential"])
                 
-            # Add Corporate IT score based on internal_it_potential
+            # Add Internal IT Department score based on internal_it_potential
             it_potential = classification.get("internal_it_potential", 50)
-            confidence_scores["Corporate IT"] = it_potential
+            confidence_scores["Internal IT Department"] = it_potential  # Changed from "Corporate IT"
         else:
-            # Add Corporate IT score with value 0 for service businesses
-            confidence_scores["Corporate IT"] = 0
+            # Add Internal IT Department score with value 0 for service businesses
+            confidence_scores["Internal IT Department"] = 0  # Changed from "Corporate IT"
                 
         # For service businesses, ensure scores are differentiated
         if is_service and (len(set(confidence_scores.values())) <= 1 or 
@@ -986,26 +994,26 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "Managed Service Provider": 80,
                     "Integrator - Commercial A/V": 15,
                     "Integrator - Residential A/V": 5,
-                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
+                    "Internal IT Department": 0  # Ensure Internal IT Department is always included with 0 for service businesses
                 }
             elif pred_class == "Integrator - Commercial A/V":
                 confidence_scores = {
                     "Integrator - Commercial A/V": 80,
                     "Managed Service Provider": 15,
                     "Integrator - Residential A/V": 5,
-                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
+                    "Internal IT Department": 0  # Ensure Internal IT Department is always included with 0 for service businesses
                 }
             else:  # Residential A/V
                 confidence_scores = {
                     "Integrator - Residential A/V": 80,
                     "Integrator - Commercial A/V": 15,
                     "Managed Service Provider": 5,
-                    "Corporate IT": 0  # Ensure Corporate IT is always included with 0 for service businesses
+                    "Internal IT Department": 0  # Ensure Internal IT Department is always included with 0 for service businesses
                 }
         
         # For service businesses, ensure predicted class matches highest confidence category
         if is_service:
-            highest_category = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
+            highest_category = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Internal IT Department" else 0)[0]
             if classification["predicted_class"] != highest_category:
                 logger.warning(f"Predicted class {classification['predicted_class']} doesn't match highest confidence category {highest_category}, fixing")
                 classification["predicted_class"] = highest_category
@@ -1090,7 +1098,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 predicted_class = "Managed Service Provider"  # Most common fallback
                 logger.warning(f"No clear service type found, defaulting to MSP")
         else:
-            predicted_class = "Non-Service Business"
+            predicted_class = "Internal IT Department"  # Changed from "Non-Service Business"
             
         # Extract or estimate internal IT potential for non-service businesses
         internal_it_potential = None
@@ -1140,12 +1148,12 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": int(msp_conf * 100),
                 "Integrator - Commercial A/V": int(comm_conf * 100),
                 "Integrator - Residential A/V": int(resi_conf * 100),
-                "Corporate IT": 0  # Service businesses always have 0 for Corporate IT
+                "Internal IT Department": 0  # Service businesses always have 0 for Internal IT Department
             }
             
             # Ensure predicted class has highest confidence
             if predicted_class in confidence_scores:
-                highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
+                highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Internal IT Department" else 0)[0]
                 confidence_scores[predicted_class] = max(confidence_scores[predicted_class], confidence_scores[highest_score] + 5)
         else:
             # Low confidence scores for all service categories
@@ -1153,7 +1161,7 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                 "Managed Service Provider": 5,
                 "Integrator - Commercial A/V": 3,
                 "Integrator - Residential A/V": 2,
-                "Corporate IT": internal_it_potential or 30  # Add Corporate IT score
+                "Internal IT Department": internal_it_potential or 30  # Add Internal IT Department score
             }
             
         # Extract or generate explanation
@@ -1395,8 +1403,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             # Convert decimal confidence to 1-100 range
             confidence_scores = {k: int(v * 100) for k, v in confidence.items()}
             
-            # Add Corporate IT with score 0 for service businesses
-            confidence_scores["Corporate IT"] = 0
+            # Add Internal IT Department with score 0 for service businesses
+            confidence_scores["Internal IT Department"] = 0
             
             return {
                 "processing_status": 2,  # Success
@@ -1453,25 +1461,25 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
             
         # Generate an appropriate explanation
         if "transport" in text_lower or "logistics" in text_lower or "trucking" in text_lower:
-            explanation = f"{domain or 'This company'} appears to be a transportation and logistics service provider, not a service/management business or an A/V integrator. The company focuses on physical transportation, shipping, or logistics rather than providing IT or A/V services to clients. This type of company typically has moderate to significant internal IT needs to manage their operations, logistics systems, and fleet management."
+            explanation = f"{domain or 'This company'} appears to be a transportation and logistics service provider, not a service/management business or an A/V integrator. The company focuses on physical transportation, shipping, or logistics rather than providing IT or A/V services. This type of company typically has moderate to significant internal IT needs to manage their operations, logistics systems, and fleet management."
         elif "vacation" in text_lower or "hotel" in text_lower or "accommodation" in text_lower or "booking" in text_lower:
             explanation = f"{domain or 'This company'} appears to be in the travel, tourism, or hospitality industry, not an IT service provider or A/V integrator. The company focuses on providing accommodations, vacation rentals, or travel-related services rather than IT or A/V services. This type of business typically has low to moderate internal IT needs to maintain booking systems and websites."
         elif "retail" in text_lower or "shop" in text_lower or "store" in text_lower or "product" in text_lower:
-            explanation = f"{domain or 'This company'} appears to be a retail or e-commerce business, not an IT service provider or A/V integrator. The company sells products rather than providing IT or A/V services to clients. This type of business typically has varying levels of internal IT needs depending on their size and online presence."
+            explanation = f"{domain or 'This company'} appears to be a retail or e-commerce business, not an IT service provider or A/V integrator. The company sells products rather than providing IT or A/V services. This type of business typically has varying levels of internal IT needs depending on their size and online presence."
         else:
             explanation = f"{domain or 'This company'} does not appear to be a service business in the IT or A/V integration space. There is no evidence that it provides managed services, IT support, or audio/visual integration to clients. Rather, it appears to be a company that might have its own internal IT needs (estimated potential: {internal_it_potential}/100)."
             
-        # Create non-service business result with minimal confidence scores for service categories
+        # Create Internal IT Department result with minimal confidence scores for service categories
         return {
             "processing_status": 2,  # Success
             "is_service_business": False,
-            "predicted_class": "Non-Service Business",
+            "predicted_class": "Internal IT Department",  # Changed from "Non-Service Business"
             "internal_it_potential": internal_it_potential,
             "confidence_scores": {
                 "Managed Service Provider": 5,
                 "Integrator - Commercial A/V": 3,
                 "Integrator - Residential A/V": 2,
-                "Corporate IT": internal_it_potential  # Add Corporate IT score based on internal IT potential
+                "Internal IT Department": internal_it_potential  # Add Internal IT Department score based on internal IT potential
             },
             "llm_explanation": explanation,
             "detection_method": "non_service_detection",
@@ -1501,17 +1509,15 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
         
         # Make sure predicted class has the highest score
         if predicted_class in confidence_scores:
-            highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Corporate IT" else 0)[0]
+            highest_score = max(confidence_scores.items(), key=lambda x: x[1] if x[0] != "Internal IT Department" else 0)[0]
             
             if highest_score != predicted_class:
                 logger.warning(f"Predicted class {predicted_class} doesn't match highest confidence {highest_score}, adjusting")
-                # Find current score of predicted class
-                current_score = confidence_scores[predicted_class]
-                # Boost it above the highest
+                # Boost predicted class above the highest
                 confidence_scores[predicted_class] = confidence_scores[highest_score] + 5
                 
         # Make sure scores are differentiated
-        service_scores = {k: v for k, v in confidence_scores.items() if k != "Corporate IT"}
+        service_scores = {k: v for k, v in confidence_scores.items() if k != "Internal IT Department"}
         if len(set(service_scores.values())) <= 1 or max(service_scores.values()) - min(service_scores.values()) < 5:
             logger.warning("Confidence scores not differentiated enough, adjusting")
             
@@ -1535,8 +1541,8 @@ YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AF
                     "Managed Service Provider": 5
                 })
                 
-        # Ensure Corporate IT is set to 0 for service businesses
-        confidence_scores["Corporate IT"] = 0
+        # Ensure Internal IT Department is set to 0 for service businesses
+        confidence_scores["Internal IT Department"] = 0
                 
         # Update classification
         classification["confidence_scores"] = confidence_scores
