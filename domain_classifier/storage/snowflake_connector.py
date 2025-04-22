@@ -1,158 +1,299 @@
-"""Storage operations for domain classification."""
-import logging
+"""Snowflake connector for domain classification data storage."""
+import os
 import json
-from typing import Dict, Any, Optional, Tuple
+import logging
+import traceback
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import load_der_private_key
+import snowflake.connector
+from snowflake.connector.errors import ProgrammingError, DatabaseError
+from datetime import datetime, timedelta
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[str, Any], 
-                      snowflake_conn: Any) -> bool:
-    """
-    Save classification data to Snowflake.
-    
-    Args:
-        domain (str): The domain name
-        url (str): The URL that was crawled
-        content (str): The website content
-        classification (Dict[str, Any]): The classification result
-        snowflake_conn: The Snowflake connector
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        # Always save the domain content
-        logger.info(f"Saving content to Snowflake for {domain}")
-        snowflake_conn.save_domain_content(
-            domain=domain, url=url, content=content
-        )
-
-        # Ensure max_confidence exists
-        if 'max_confidence' not in classification:
-            confidence_scores = classification.get('confidence_scores', {})
-            max_confidence = max(confidence_scores.values()) if confidence_scores else 0.5
-            classification['max_confidence'] = max_confidence
-
-        # Set low_confidence flag based on confidence threshold
-        if 'low_confidence' not in classification:
-            from domain_classifier.config.settings import LOW_CONFIDENCE_THRESHOLD
-            classification['low_confidence'] = classification['max_confidence'] < LOW_CONFIDENCE_THRESHOLD
-
-        # Get explanation directly from classification
-        llm_explanation = classification.get('llm_explanation', '')
-        
-        # If explanation is too long, trim it properly at a sentence boundary
-        if len(llm_explanation) > 4000:
-            # Find the last period before 3900 chars
-            last_period_index = llm_explanation[:3900].rfind('.')
-            if last_period_index > 0:
-                llm_explanation = llm_explanation[:last_period_index + 1]
-            else:
-                # If no period found, just truncate with an ellipsis
-                llm_explanation = llm_explanation[:3900] + "..."
-            
-        # Create model metadata
-        model_metadata = {
-            'model_version': '1.0',
-            'llm_model': 'claude-3-haiku-20240307'
-        }
-        
-        # Convert model metadata to JSON string
-        model_metadata_json = json.dumps(model_metadata)[:4000]  # Limit size
-            
-        # Special case for parked domains - save as "Parked Domain" if is_parked flag is set
-        company_type = classification.get('predicted_class', 'Unknown')
-        if classification.get('is_parked', False):
-            company_type = "Parked Domain"
-        
-        logger.info(f"Saving classification to Snowflake: {domain}, {company_type}")
-        snowflake_conn.save_classification(
-            domain=domain,
-            company_type=str(company_type),
-            confidence_score=float(classification['max_confidence']),
-            all_scores=json.dumps(classification.get('confidence_scores', {}))[:4000],  # Limit size
-            model_metadata=model_metadata_json,
-            low_confidence=bool(classification.get('low_confidence', False)),
-            detection_method=str(classification.get('detection_method', 'llm_classification')),
-            llm_explanation=llm_explanation  # Add explanation directly to save_classification
-        )
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error saving to Snowflake: {e}")
-        return False
-
-def process_fresh_result(classification: Dict[str, Any], domain: str, 
-                         email: Optional[str] = None, url: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Process a fresh classification result for API response.
-    
-    Args:
-        classification (Dict[str, Any]): The classification result
-        domain (str): The domain being classified
-        email (Optional[str]): Optional email address
-        url (Optional[str]): Optional website URL
-        
-    Returns:
-        Dict[str, Any]: The processed result for API response
-    """
-    # Create a standardized result
-    result = {
-        "domain": domain,
-        "predicted_class": classification.get("predicted_class", "Unknown"),
-        "confidence_score": int(classification.get("max_confidence", 0.5) * 100),
-        "confidence_scores": classification.get("confidence_scores", {}),
-        "explanation": classification.get("llm_explanation", ""),
-        "low_confidence": classification.get("low_confidence", False),
-        "detection_method": classification.get("detection_method", "api"),
-        "source": "fresh",
-        "is_parked": classification.get("is_parked", False)
-    }
-    
-    # Add email and URL if provided
-    if email:
-        result["email"] = email
-    
-    if url:
-        result["website_url"] = url
-    
-    # Add company description if available
-    if "company_description" in classification:
-        result["company_description"] = classification["company_description"]
-    
-    return result
-
-class FallbackSnowflakeConnector:
-    """Fallback connector when Snowflake is not available."""
-    
+class SnowflakeConnector:
     def __init__(self):
-        """Initialize the fallback connector."""
+        """Initialize Snowflake connection with environment variables."""
         self.connected = False
-        logger.warning("Using FallbackSnowflakeConnector")
         
-    def check_existing_classification(self, domain: str) -> Optional[Dict[str, Any]]:
-        """Check existing classification (always returns None)."""
-        logger.info(f"Fallback: No existing classification for {domain}")
-        return None
+        # Get connection parameters from environment variables
+        self.account = os.environ.get('SNOWFLAKE_ACCOUNT')
+        self.user = os.environ.get('SNOWFLAKE_USER')
+        self.database = os.environ.get('SNOWFLAKE_DATABASE')
+        self.schema = os.environ.get('SNOWFLAKE_SCHEMA')
+        self.warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE')
+        self.authenticator = os.environ.get('SNOWFLAKE_AUTHENTICATOR')
+        self.private_key_path = os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH')
         
-    def save_domain_content(self, domain: str, url: str, content: str) -> Tuple[bool, Optional[str]]:
-        """Save domain content (no-op)."""
-        logger.info(f"Fallback: Not saving domain content for {domain}")
-        return True, None
+        # Create RSA key file if it doesn't exist
+        if not os.path.exists(self.private_key_path) and 'SNOWFLAKE_KEY_BASE64' in os.environ:
+            try:
+                dir_path = os.path.dirname(self.private_key_path)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path)
+                    
+                with open(self.private_key_path, 'wb') as key_file:
+                    import base64
+                    key_data = base64.b64decode(os.environ.get('SNOWFLAKE_KEY_BASE64'))
+                    key_file.write(key_data)
+                    
+                os.chmod(self.private_key_path, 0o600)
+                logger.info(f"Created RSA key file at {self.private_key_path}")
+            except Exception as e:
+                logger.error(f"Failed to create RSA key file: {e}")
         
-    def save_classification(self, domain: str, company_type: str, confidence_score: float, 
-                           all_scores: str, model_metadata: str, low_confidence: bool, 
-                           detection_method: str, llm_explanation: str) -> Tuple[bool, Optional[str]]:
-        """Save classification (no-op)."""
-        logger.info(f"Fallback: Not saving classification for {domain}")
-        return True, None
+        # Check for required credentials
+        if not self.account or not self.user or not self.private_key_path:
+            logger.warning("Missing Snowflake credentials. Using fallback mode.")
+            return
         
-    def get_domain_content(self, domain: str) -> Optional[str]:
-        """Get domain content (always returns None)."""
-        logger.info(f"Fallback: No content for {domain}")
-        return None
-        
-    def close(self):
-        """Close the connection (no-op)."""
-        pass
+        try:
+            self._init_connection()
+        except Exception as e:
+            logger.error(f"Failed to initialize Snowflake connection: {e}")
+            self.connected = False
+    
+    def _init_connection(self):
+        """Initialize the Snowflake connection."""
+        try:
+            # Check if the RSA key exists
+            if os.path.exists(self.private_key_path):
+                logger.info(f"Found RSA key at {self.private_key_path}")
+                
+                # Test connection
+                conn = self.get_connection()
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT current_version()")
+                    version = cursor.fetchone()[0]
+                    logger.info(f"Connected to Snowflake. Version: {version}")
+                    
+                    # Skip table creation as tables already exist
+                    cursor.close()
+                    conn.close()
+                    self.connected = True
+                else:
+                    logger.error("Could not establish Snowflake connection")
+                    self.connected = False
+            else:
+                logger.warning(f"RSA key not found at {self.private_key_path}")
+                self.connected = False
+        except Exception as e:
+            logger.error(f"Error connecting to Snowflake: {e}")
+            self.connected = False
+            raise
+    
+    def load_private_key(self, path):
+        """Load private key from path."""
+        try:
+            with open(path, "rb") as key_file:
+                return key_file.read()
+        except Exception as e:
+            logger.error(f"Error loading private key: {e}")
+            return None
+    
+    def get_connection(self):
+        """Get a new Snowflake connection."""
+        if not os.path.exists(self.private_key_path):
+            logger.warning(f"Private key not found at {self.private_key_path}")
+            return None
+            
+        try:
+            private_key = self.load_private_key(self.private_key_path)
+            if not private_key:
+                return None
+                
+            return snowflake.connector.connect(
+                user=self.user,
+                account=self.account,
+                private_key=private_key,
+                warehouse=self.warehouse,
+                database=self.database,
+                schema=self.schema,
+                authenticator=self.authenticator,
+                session_parameters={'QUERY_TAG': 'WebCrawlerBot'}
+            )
+        except Exception as e:
+            logger.error(f"Error getting Snowflake connection: {e}")
+            return None
+    
+    def check_existing_classification(self, domain):
+        """Check if a domain already has a classification in Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: No existing classification for {domain}")
+            return None
+            
+        conn = self.get_connection()
+        if not conn:
+            return None
+            
+        try:
+            cursor = conn.cursor()
+            # Look for classifications not older than 30 days and include LLM_EXPLANATION field
+            query = """
+                SELECT
+                    DOMAIN,
+                    COMPANY_TYPE,
+                    CONFIDENCE_SCORE,
+                    ALL_SCORES,
+                    LOW_CONFIDENCE,
+                    DETECTION_METHOD,
+                    MODEL_METADATA,
+                    CLASSIFICATION_DATE,
+                    LLM_EXPLANATION
+                FROM DOMAIN_CLASSIFICATION
+                WHERE DOMAIN = %s
+                AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
+                ORDER BY CLASSIFICATION_DATE DESC
+                LIMIT 1
+            """
+            cursor.execute(query, (domain,))
+            
+            result = cursor.fetchone()
+            if result:
+                # Get column names from cursor description
+                column_names = [col[0] for col in cursor.description]
+                existing_record = dict(zip(column_names, result))
+                logger.info(f"Found existing classification for {domain}: {existing_record['COMPANY_TYPE']}")
+                return existing_record
+            
+            logger.info(f"No existing classification found for {domain}")
+            return None
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            logger.error(f"Error checking existing classification: {error_msg}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_domain_content(self, domain):
+        """Get the most recent content for a domain from Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: No content for {domain}")
+            return None
+            
+        conn = self.get_connection()
+        if not conn:
+            return None
+            
+        try:
+            cursor = conn.cursor()
+            query = """
+                SELECT text_content
+                FROM DOMAIN_CONTENT
+                WHERE domain = %s
+                ORDER BY crawl_date DESC
+                LIMIT 1
+            """
+            cursor.execute(query, (domain,))
+            
+            result = cursor.fetchone()
+            if result and result[0]:
+                logger.info(f"Found existing content for {domain}")
+                return result[0]
+            
+            logger.info(f"No existing content found for {domain}")
+            return None
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            logger.error(f"Error retrieving domain content: {error_msg}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def save_domain_content(self, domain, url, content):
+        """Save domain content to Snowflake."""
+        if not self.connected:
+            logger.info(f"Fallback: Not saving domain content for {domain}")
+            return True, None
+            
+        conn = self.get_connection()
+        if not conn:
+            return False, "Failed to connect to Snowflake"
+            
+        try:
+            cursor = conn.cursor()
+            
+            # Check if content exists and is not empty
+            if not content or len(content.strip()) < 100:
+                logger.warning(f"Content for {domain} is too short or empty, not saving")
+                return False, "Content too short or empty"
+            
+            # Insert new record
+            cursor.execute("""
+                INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
+            """, (domain, url, content))
+            
+            conn.commit()
+            logger.info(f"Saved domain content for {domain}")
+            return True, None
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            if conn:
+                conn.rollback()
+            logger.error(f"Error saving domain content: {error_msg}")
+            return False, error_msg
+        finally:
+            if conn:
+                conn.close()
+    
+    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, llm_explanation=None):
+        """Save domain classification to Snowflake with explanation."""
+        if not self.connected:
+            logger.info(f"Fallback: Not saving classification for {domain}")
+            return True, None
+            
+        conn = self.get_connection()
+        if not conn:
+            return False, "Failed to connect to Snowflake"
+            
+        try:
+            cursor = conn.cursor()
+            
+            # Insert new record - including LLM_EXPLANATION field
+            query = """
+                INSERT INTO DOMAIN_CLASSIFICATION 
+                (domain, company_type, confidence_score, all_scores, model_metadata, 
+                low_confidence, detection_method, classification_date, llm_explanation)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+            """
+            
+            # Ensure explanation isn't too long
+            if llm_explanation and len(llm_explanation) > 5000:
+                # Truncate at a sentence boundary
+                last_period = llm_explanation[:4900].rfind('.')
+                if last_period > 0:
+                    llm_explanation = llm_explanation[:last_period+1]
+                else:
+                    llm_explanation = llm_explanation[:4900] + "..."
+            
+            params = (
+                domain, 
+                company_type, 
+                confidence_score, 
+                all_scores, 
+                model_metadata, 
+                low_confidence, 
+                detection_method,
+                llm_explanation  # Include explanation as a parameter
+            )
+            
+            cursor.execute(query, params)
+            
+            conn.commit()
+            logger.info(f"Saved classification for {domain}: {company_type}")
+            return True, None
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            if conn:
+                conn.rollback()
+            logger.error(f"Error saving classification: {error_msg}")
+            return False, error_msg
+        finally:
+            if conn:
+                conn.close()
