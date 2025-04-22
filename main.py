@@ -8,37 +8,39 @@ import sys
 import logging
 import traceback
 
-# Add very visible debug statements to verify this file is being used
-print("="*80)
-print("STARTING DOMAIN CLASSIFIER USING NEW MODULAR STRUCTURE")
-print("Python version:", sys.version)
-print("Current directory:", os.getcwd())
-print("Files in directory:", os.listdir("."))
-print("="*80)
-
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-logger.info("INITIALIZING DOMAIN CLASSIFIER USING NEW MODULAR STRUCTURE")
 
+print("="*80)
+print("STARTING DOMAIN CLASSIFIER")
+print("Python version:", sys.version)
+print("Current directory:", os.getcwd())
+print("="*80)
+
+# Try to import from modular structure, but fall back to old structure if it fails
 try:
-    # Import from the modular structure
     from domain_classifier.api.app import create_app
-    logger.info("Successfully imported create_app from modular structure")
+    logger.info("Successfully imported from modular structure")
 except Exception as e:
-    print("ERROR IMPORTING FROM MODULAR STRUCTURE:", str(e))
     logger.error(f"Error importing from modular structure: {e}")
     logger.error(traceback.format_exc())
-    # Fall back to old structure for now
-    print("Falling back to old structure")
-    import api_service
-    app = api_service.app
-    logger.info("Fallback to old structure completed")
+    
+    # Import from old structure as fallback
+    try:
+        logger.info("Falling back to old structure")
+        import api_service
+        app = api_service.app
+        logger.info("Successfully imported from old structure")
+    except Exception as e:
+        logger.error(f"Error importing from old structure: {e}")
+        logger.error(traceback.format_exc())
+        raise
 else:
-    # Create RSA key from base64 environment variable (previously in startup.sh)
+    # Create RSA key from base64 environment variable
     if "SNOWFLAKE_KEY_BASE64" in os.environ:
         import base64
         key_path = "/workspace/rsa_key.der"
@@ -58,20 +60,10 @@ else:
         logger.warning("SNOWFLAKE_KEY_BASE64 not set. Snowflake integration will be disabled.")
     
     # Create the Flask application
-    logger.info("Creating Flask app using modular structure")
     app = create_app()
-    logger.info("Flask app created successfully")
-
-# Print debug info about the app
-print("App routes:")
-for rule in app.url_map.iter_rules():
-    print(f"  - {rule}")
 
 # For direct execution
 if __name__ == "__main__":
     # Get port from environment or use default
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting app on port {port}")
     app.run(host="0.0.0.0", port=port)
-else:
-    logger.info("Running as imported module (e.g., via gunicorn)")
