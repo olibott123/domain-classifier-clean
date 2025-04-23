@@ -327,5 +327,81 @@ def register_routes(app):
             error_result = create_error_result("unknown", error_type, error_detail)
             error_result["error"] = str(e)
             return jsonify(error_result), 500
+
+    @app.route('/classify-and-enrich', methods=['POST', 'OPTIONS'])
+    def classify_and_enrich():
+        """Classify a domain and enrich it with Apollo data"""
+        # Handle preflight requests
+        if request.method == 'OPTIONS':
+            return '', 204
+        
+        try:
+            data = request.json
+            input_value = data.get('url', '').strip()
+            
+            if not input_value:
+                return jsonify({"error": "URL or email is required"}), 400
+            
+            # First perform standard classification
+            # Store original request
+            original_request = request.json.copy()
+            
+            # Call classify_domain directly
+            classification_response = classify_domain()
+            
+            # Extract response data and status code
+            if isinstance(classification_response, tuple):
+                classification_result = classification_response[0].json
+                status_code = classification_response[1]
+            else:
+                classification_result = classification_response.json
+                status_code = 200
+            
+            # Only proceed with enrichment for successful classifications
+            if status_code >= 400:
+                logger.warning(f"Classification failed with status {status_code}, skipping enrichment")
+                return classification_response
+            
+            # Extract domain from classification result
+            domain = classification_result.get('domain')
+            
+            if not domain:
+                logger.error("No domain found in classification result")
+                return jsonify({"error": "Failed to extract domain from classification result"}), 500
+            
+            # Import Apollo connector here to avoid circular imports
+            from domain_classifier.enrichment.apollo_connector import ApolloConnector
+            
+            # Enrich with Apollo data
+            apollo = ApolloConnector()
+            enrichment_data = apollo.enrich_company(domain)
+            
+            # Import recommendation engine
+            from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
+            
+            # Generate recommendations based on classification and Apollo data
+            recommendation_engine = DomotzRecommendationEngine()
+            recommendations = recommendation_engine.generate_recommendations(
+                classification_result.get('predicted_class'),
+                enrichment_data
+            )
+            
+            # Add enrichment data to classification result
+            classification_result['apollo_data'] = enrichment_data or {}
+            classification_result['domotz_recommendations'] = recommendations
+            
+            # Return the enriched result
+            logger.info(f"Successfully enriched and generated recommendations for {domain}")
+            return jsonify(classification_result), 200
+            
+        except Exception as e:
+            logger.error(f"Error in classify-and-enrich: {e}\n{traceback.format_exc()}")
+            # Try to identify the error type
+            error_type, error_detail = detect_error_type(str(e))
+            # Create an error response
+            error_result = create_error_result(domain if 'domain' in locals() else "unknown", 
+                                             error_type, error_detail)
+            error_result["error"] = str(e)  # Add the actual error message
+            return jsonify(error_result), 500
             
     return app
