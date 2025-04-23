@@ -14,7 +14,7 @@ def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[
         if snowflake_conn is None:
             from domain_classifier.storage.snowflake_connector import SnowflakeConnector
             snowflake_conn = SnowflakeConnector()
-        
+            
         # Always save the domain content
         logger.info(f"Saving content to Snowflake for {domain}")
         snowflake_conn.save_domain_content(
@@ -50,7 +50,7 @@ def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[
             else:
                 # If no period found, just truncate with an ellipsis
                 llm_explanation = llm_explanation[:3900] + "..."
-            
+                
         # Create model metadata
         model_metadata = {
             'model_version': '1.0',
@@ -59,12 +59,12 @@ def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[
         
         # Convert model metadata to JSON string
         model_metadata_json = json.dumps(model_metadata)[:4000]  # Limit size
-            
+        
         # Special case for parked domains - save as "Parked Domain" if is_parked flag is set
         company_type = classification.get('predicted_class', 'Unknown')
         if classification.get('is_parked', False):
             company_type = "Parked Domain"
-        
+            
         logger.info(f"Saving classification to Snowflake: {domain}, {company_type}")
         snowflake_conn.save_classification(
             domain=domain,
@@ -77,9 +77,12 @@ def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[
             llm_explanation=llm_explanation  # Add explanation directly to save_classification
         )
         
-        # Also save to vector DB if configured
-        save_to_vector_db(domain, url, content, classification)
-        
+        # Also save to vector database
+        try:
+            save_to_vector_db(domain, url, content, classification)
+        except Exception as e:
+            logger.error(f"Error saving to vector DB (non-critical): {e}")
+            
         return True
     except Exception as e:
         logger.error(f"Error saving to Snowflake: {e}\n{traceback.format_exc()}")
@@ -100,17 +103,35 @@ def save_to_vector_db(domain: str, url: str, content: str, classification: Dict[
         bool: True if successful, False otherwise
     """
     try:
+        # If Pinecone or Anthropic aren't available, just skip silently
+        try:
+            from domain_classifier.storage.vector_db import PINECONE_AVAILABLE, ANTHROPIC_AVAILABLE
+            if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
+                logger.info(f"Pinecone or Anthropic not available, skipping vector storage for {domain}")
+                return False
+        except ImportError:
+            logger.info(f"Vector DB module not available, skipping vector storage for {domain}")
+            return False
+            
         # If no connector is provided, import and create one
         if vector_db_conn is None:
-            from domain_classifier.storage.vector_db import VectorDBConnector
-            vector_db_conn = VectorDBConnector()
-            
+            try:
+                logger.info("Creating new VectorDBConnector instance...")
+                from domain_classifier.storage.vector_db import VectorDBConnector
+                vector_db_conn = VectorDBConnector()
+                logger.info(f"Created new VectorDBConnector instance, connected: {vector_db_conn.connected}")
+            except Exception as e:
+                logger.error(f"Error creating VectorDBConnector: {e}")
+                logger.error(traceback.format_exc())
+                return False
+                
         # Skip if not connected to vector DB
         if not getattr(vector_db_conn, 'connected', False):
             logger.info(f"Vector DB not connected, skipping vector storage for {domain}")
             return False
             
         # Prepare metadata from classification
+        logger.info(f"Preparing metadata for vector storage: {domain}")
         metadata = {
             "domain": domain,
             "url": url,
@@ -136,116 +157,9 @@ def save_to_vector_db(domain: str, url: str, content: str, classification: Dict[
             metadata=metadata
         )
         
-        return success
-    except Exception as e:
-        logger.error(f"Error saving to vector DB: {e}\n{traceback.format_exc()}")
-        return False
-
-def query_similar_domains(query_text: str, top_k: int = 5, filter: Dict[str, Any] = None):
-    """
-    Query for domains similar to the given text.
-    
-    Args:
-        query_text: The text to query
-        top_k: Number of results to return
-        filter: Optional filter for query
-        
-    Returns:
-        list: List of similar domains with metadata
-    """
-    try:
-        from domain_classifier.storage.vector_db import VectorDBConnector
-        vector_db = VectorDBConnector()
-        
-        if not getattr(vector_db, 'connected', False):
-            logger.warning("Vector DB not connected, cannot query similar domains")
-            return []
-            
-        return vector_db.query_similar_domains(
-            query_text=query_text,
-            top_k=top_k,
-            filter=filter
-        )
-    except Exception as e:
-        logger.error(f"Error querying similar domains: {e}")
-        return []
-
-def save_to_vector_db(domain: str, url: str, content: str, classification: Dict[str, Any], vector_db_conn=None):
-    """
-    Save domain classification data to vector database.
-    
-    Args:
-        domain: The domain being classified
-        url: The URL of the website
-        content: The content of the website
-        classification: The classification result
-        vector_db_conn: Optional vector DB connector instance
-    
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        # If Pinecone or OpenAI aren't available, just skip silently
-        try:
-            from domain_classifier.storage.vector_db import PINECONE_AVAILABLE, ANTHROPIC_AVAILABLE
-            if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
-                logger.info(f"Pinecone or Anthropic not available, skipping vector storage for {domain}")
-                return False
-        except ImportError:
-            logger.info(f"Vector DB module not available, skipping vector storage for {domain}")
-            return False
-            
-        # If no connector is provided, import and create one
-        if vector_db_conn is None:
-            try:
-                from domain_classifier.storage.vector_db import VectorDBConnector
-                vector_db_conn = VectorDBConnector()
-                logger.info(f"Created new VectorDBConnector instance, connected: {getattr(vector_db_conn, 'connected', False)}")
-            except Exception as e:
-                logger.error(f"Error creating VectorDBConnector: {e}")
-                return False
-                
-        # Skip if not connected to vector DB
-        if not getattr(vector_db_conn, 'connected', False):
-            logger.info(f"Vector DB not connected, skipping vector storage for {domain}")
-            return False
-            
-        # Prepare metadata from classification
-        predicted_class = classification.get('predicted_class', 'Unknown')
-        confidence = classification.get('max_confidence', 0.5)
-        
-        logger.info(f"Preparing to store domain in vector DB: {domain} (Class: {predicted_class}, Confidence: {confidence:.2f})")
-        
-        metadata = {
-            "domain": domain,
-            "url": url,
-            "predicted_class": predicted_class,
-            "confidence_score": float(confidence),
-            "is_service_business": classification.get('is_service_business', None),
-            "internal_it_potential": classification.get('internal_it_potential', 0),
-            "detection_method": classification.get('detection_method', 'unknown'),
-            "low_confidence": classification.get('low_confidence', False),
-            "is_parked": classification.get('is_parked', False),
-            "classification_date": classification.get('classification_date', '')
-        }
-        
-        # Add company description if available
-        if 'company_description' in classification:
-            metadata['company_description'] = classification['company_description']
-            
-        # Store the vectorized data
-        logger.info(f"Sending vector data to Pinecone for domain: {domain}")
-        success = vector_db_conn.upsert_domain_vector(
-            domain=domain,
-            content=content,
-            metadata=metadata
-        )
-        
         if success:
-            logger.info(f"✅ Successfully saved domain {domain} to Pinecone!")
-        else:
-            logger.warning(f"Failed to save domain {domain} to Pinecone")
-            
+            logger.info(f"✅ Successfully stored {domain} in vector database")
+        
         return success
     except Exception as e:
         logger.error(f"Error saving to vector DB: {e}")
