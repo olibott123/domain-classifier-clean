@@ -73,7 +73,7 @@ def generate_detailed_description(classification: Dict[str, Any], apollo_data: O
         company_type = classification.get('predicted_class', '')
         domain = classification.get('domain', '')
         
-        prompt = f"""Based on the following information, write a detailed, 100-word company description for {company_name}:
+        prompt = f"""Based on the following information, write a factual, service-focused company description for {company_name}:
 
 Business Type: {company_type}
 Domain: {domain}
@@ -93,17 +93,15 @@ Size: Approximately {size} employees
 Technologies: {', '.join(technologies) if technologies else 'Unknown'}
 """
 
-        # Add person data if available
-        if apollo_person_data:
-            person_title = apollo_person_data.get('title', '')
-            if person_title:
-                prompt += f"\nLeadership: Has a {person_title} position\n"
-
         # Add the original description
         prompt += f"""
 Original Description: {classification.get('company_description', '')}
 
-Write a comprehensive, natural-sounding paragraph that explains what this company does, who they serve, and what makes them distinct. Focus on being specific rather than generic. Aim for approximately 100 words.
+Write a factual, objective description that focuses specifically on what services or products the company provides. 
+Avoid marketing language, subjective quality statements, and unnecessary adjectives. 
+Focus on concrete services, technologies, or industries they serve.
+Be specific about what they do rather than how well they do it.
+Write approximately 75-100 words.
 """
 
         # Call Claude
@@ -116,7 +114,7 @@ Write a comprehensive, natural-sounding paragraph that explains what this compan
             },
             json={
                 "model": "claude-3-haiku-20240307",
-                "system": "You are a business analyst who writes concise, accurate company descriptions.",
+                "system": "You are a business analyst who writes factual, objective company descriptions focused on what services a company provides. Avoid marketing language, subjective quality statements, and unnecessary adjectives. Be specific about what they do rather than how well they do it.",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 300
             }
