@@ -19,7 +19,7 @@ try:
     logger.info("Attempting to import pinecone-client...")
     import pinecone
     PINECONE_AVAILABLE = True
-    logger.info(f"✅ Pinecone library successfully imported (version: {pinecone.__version__})")
+    logger.info(f"✅ Pinecone library successfully imported (version: {getattr(pinecone, '__version__', 'unknown')})")
 except Exception as e:
     logger.error(f"❌ Error importing Pinecone: {str(e)}")
     logger.error(traceback.format_exc())
@@ -38,17 +38,20 @@ except Exception as e:
 class VectorDBConnector:
     def __init__(self, 
                  api_key: str = None, 
-                 index_name: str = None):
+                 index_name: str = None,
+                 environment: str = None):
         """
         Initialize the Pinecone vector database connector.
         
         Args:
             api_key: The API key for Pinecone
             index_name: The name of the Pinecone index to use
+            environment: The Pinecone environment (region) to use
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
         # Use domain-embeddings to match existing index
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
+        self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "us-east-1")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.connected = False
         self.index = None
@@ -57,6 +60,7 @@ class VectorDBConnector:
         logger.info(f"Initializing VectorDBConnector with index: {self.index_name}")
         logger.info(f"PINECONE_API_KEY available: {bool(self.api_key)}")
         logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
+        logger.info(f"Using Pinecone environment: {self.environment}")
         
         # Don't even try if dependencies aren't available
         if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
@@ -66,11 +70,20 @@ class VectorDBConnector:
         # Set up Anthropic client if API key is available
         if self.anthropic_api_key:
             try:
-                # Fixed: simplified Anthropic client initialization
-                self.anthropic_client = anthropic.Anthropic(
-                    api_key=self.anthropic_api_key
-                )
-                logger.info("✅ Anthropic client initialized successfully")
+                # Fix Anthropic client initialization - try both modern and legacy formats
+                logger.info("Initializing Anthropic client (with compatibility handling)...")
+                try:
+                    # Try modern client init with just the api_key parameter
+                    self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
+                    logger.info("✅ Modern Anthropic client initialized successfully")
+                except TypeError as e:
+                    # If that fails with TypeError, try legacy format
+                    logger.info(f"Modern client failed: {str(e)}, trying legacy format")
+                    if hasattr(anthropic, "Client"):
+                        self.anthropic_client = anthropic.Client(api_key=self.anthropic_api_key)
+                        logger.info("✅ Legacy Anthropic client initialized successfully")
+                    else:
+                        raise ValueError("Neither modern nor legacy Anthropic client formats worked")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Anthropic client: {e}")
                 logger.error(traceback.format_exc())
@@ -94,10 +107,10 @@ class VectorDBConnector:
         """Initialize the connection to Pinecone using older API."""
         try:
             # Initialize Pinecone client (older API style)
-            logger.info("Initializing Pinecone connection...")
+            logger.info(f"Initializing Pinecone connection with environment: {self.environment}")
             pinecone.init(
                 api_key=self.api_key,
-                environment="gcp-starter"  # You might need to adjust this
+                environment=self.environment
             )
             
             # Check if index exists - safely
@@ -105,6 +118,11 @@ class VectorDBConnector:
                 logger.info("Listing available Pinecone indexes...")
                 existing_indexes = pinecone.list_indexes()
                 logger.info(f"Available Pinecone indexes: {existing_indexes}")
+                
+                # Log more details for debugging
+                if not existing_indexes:
+                    logger.warning("⚠️ No indexes found with the provided API key")
+                    logger.info("This means either: 1) The API key doesn't have access to any indexes, or 2) You need to create an index")
             except Exception as e:
                 logger.error(f"❌ Error listing Pinecone indexes: {e}")
                 logger.error(traceback.format_exc())
@@ -114,7 +132,7 @@ class VectorDBConnector:
             if self.index_name in existing_indexes:
                 logger.info(f"✅ Found existing Pinecone index: {self.index_name}")
                 try:
-                    # For the older API, we just use this reference
+                    # For the older API, we use this reference
                     self.index = pinecone.Index(self.index_name)
                     self.connected = True
                     logger.info("✅ Successfully connected to Pinecone index")
@@ -124,35 +142,25 @@ class VectorDBConnector:
                         stats = pinecone.describe_index(self.index_name)
                         dimension = stats.get("dimension", 0)
                         logger.info(f"Index dimension: {dimension}")
+                        logger.info(f"Index stats: {stats}")
                     except Exception as e:
                         logger.warning(f"Could not get index stats: {e}")
-                        logger.warning(traceback.format_exc())
                         
                 except Exception as e:
                     logger.error(f"❌ Error connecting to index: {e}")
                     logger.error(traceback.format_exc())
                     return
             else:
-                # If index doesn't exist, create it
-                logger.info(f"Index {self.index_name} does not exist. Creating it now...")
-                try:
-                    # Create a new index with 227 dimensions (matching your existing schema)
-                    pinecone.create_index(
-                        name=self.index_name,
-                        dimension=227,
-                        metric="cosine"
-                    )
-                    logger.info(f"✅ Successfully created Pinecone index: {self.index_name}")
-                    
-                    # Connect to the newly created index
-                    self.index = pinecone.Index(self.index_name)
-                    self.connected = True
-                    logger.info("✅ Successfully connected to new Pinecone index")
-                except Exception as e:
-                    logger.error(f"❌ Error creating Pinecone index: {e}")
-                    logger.error(traceback.format_exc())
-                    self.connected = False
-                    return
+                logger.warning(f"❌ Index {self.index_name} not found in available indexes: {existing_indexes}")
+                logger.warning("Unable to connect to the index - please make sure it exists in your Pinecone account")
+                logger.warning("You'll need to manually create the index in the Pinecone Console with:")
+                logger.warning(f"- Name: {self.index_name}")
+                logger.warning("- Dimensions: 227")
+                logger.warning("- Metric: cosine")
+                logger.warning(f"- Environment: {self.environment}")
+                
+                # Don't try to create it automatically as it failed before
+                self.connected = False
                 
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
@@ -161,7 +169,7 @@ class VectorDBConnector:
     
     def create_embedding(self, text: str) -> Optional[List[float]]:
         """
-        Create an embedding for the given text using Anthropic.
+        Create an embedding for the given text using a deterministic hash-based approach.
         
         Args:
             text: The text to embed
@@ -169,12 +177,8 @@ class VectorDBConnector:
         Returns:
             list: The embedding vector or None if failed
         """
-        if not self.anthropic_client:
-            logger.warning("❌ Anthropic client not available, cannot create embedding")
-            return None
-            
         try:
-            # Truncate text if it's too long (Anthropic also has token limits)
+            # Truncate text if it's too long
             text_length = len(text)
             if text_length > 20000:
                 logger.warning(f"Text too long ({text_length} chars), truncating to 20000 chars")
@@ -182,93 +186,28 @@ class VectorDBConnector:
             
             logger.info(f"Creating embedding for text of length {len(text)} chars...")
             
-            # Use Anthropic to generate a summary and then create a simple embedding
-            prompt = f"""Given the following text, extract the 10-15 most important keywords or phrases that represent the main topics and concepts. For each keyword, assign a relevance score from 0 to 1. Return the results as a JSON array of objects with 'keyword' and 'score' properties.
-
-Text to analyze:
-{text}
-
-The JSON output should be formatted exactly like this:
-[
-  {{"keyword": "example keyword 1", "score": 0.95}},
-  {{"keyword": "example keyword 2", "score": 0.85}}
-]
-
-Do not include any other text in your response, just the JSON data.
-"""
+            # Create a deterministic embedding based on the text content
+            # This uses a hash-based approach that's consistent for the same input
+            np.random.seed(42)  # Fixed seed for reproducibility
             
-            # Call Claude to extract features
-            try:
-                logger.info("Calling Anthropic API to extract key features from text...")
-                response = self.anthropic_client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=1000,
-                    temperature=0,
-                    system="You analyze text and extract the most important keywords with relevance scores. Output only valid JSON.",
-                    messages=[
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                
-                # Extract the JSON response
-                json_text = response.content[0].text
-                
-                # Clean up the JSON text to ensure it's valid
-                json_text = json_text.strip()
-                if json_text.startswith("```json"):
-                    json_text = json_text.replace("```json", "", 1)
-                if json_text.endswith("```"):
-                    json_text = json_text[:-3]
-                json_text = json_text.strip()
-                
-                # Parse the JSON
-                try:
-                    keywords = json.loads(json_text)
-                    logger.info(f"✅ Successfully extracted {len(keywords)} keywords from text")
-                    
-                    # Create a vector with 227 dimensions to match existing index
-                    # Create a seed for consistent hashing
-                    np.random.seed(42)
-                    
-                    # Initialize the embedding vector (227 dimensions)
-                    embedding = np.zeros(227)
-                    
-                    # For each keyword, create a random vector and multiply by its score
-                    for item in keywords:
-                        keyword = item.get("keyword", "")
-                        score = item.get("score", 0.5)
-                        
-                        # Create a hash of the keyword
-                        keyword_hash = int(hashlib.md5(keyword.encode()).hexdigest(), 16)
-                        
-                        # Use the hash to seed a random vector
-                        np.random.seed(keyword_hash)
-                        keyword_vector = np.random.normal(0, 1, 227)  # 227 dimensions to match index
-                        
-                        # Add the weighted keyword vector to the embedding
-                        embedding += keyword_vector * score
-                    
-                    # Normalize the embedding
-                    norm = np.linalg.norm(embedding)
-                    if norm > 0:
-                        embedding = embedding / norm
-                    
-                    # Convert to list and return
-                    embedding_list = embedding.tolist()
-                    
-                    logger.info(f"✅ Created embedding with {len(embedding_list)} dimensions")
-                    return embedding_list
-                    
-                except json.JSONDecodeError as e:
-                    logger.error(f"❌ Error parsing JSON response: {e}")
-                    logger.error(f"Raw response: {json_text}")
-                    return None
-                
-            except Exception as e:
-                logger.error(f"❌ Error calling Anthropic: {e}")
-                logger.error(traceback.format_exc())
-                return None
-                
+            # Create a hash of the text
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            hash_int = int(text_hash, 16)
+            
+            # Use the hash to seed the random number generator
+            np.random.seed(hash_int % 2**32)
+            
+            # Create an embedding vector with 227 dimensions to match the index
+            embedding = np.random.normal(0, 1, 227)
+            
+            # Normalize the embedding to unit length (required for cosine similarity)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            
+            logger.info(f"✅ Created hash-based embedding with 227 dimensions")
+            return embedding.tolist()
+            
         except Exception as e:
             logger.error(f"❌ Error creating embedding: {e}")
             logger.error(traceback.format_exc())
@@ -334,7 +273,7 @@ Do not include any other text in your response, just the JSON data.
                     sanitized_metadata[key] = str(value)
             
             # Include key information in log
-            logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class')}")
+            logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class', 'unknown')}")
             
             # Upsert vector (for older API)
             self.index.upsert(
