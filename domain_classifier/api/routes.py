@@ -7,7 +7,7 @@ import traceback
 logger = logging.getLogger(__name__)
 
 # Import domain utilities
-from domain_classifier.utils.domain_utils import extract_domain_from_email
+from domain_classifier.utils.domain_utils import extract_domain_from_email, extract_domain_from_url
 from domain_classifier.utils.error_handling import detect_error_type, create_error_result
 
 # Import configuration
@@ -342,6 +342,10 @@ def register_routes(app):
             if not input_value:
                 return jsonify({"error": "URL or email is required"}), 400
             
+            # Determine if input is an email
+            is_email = '@' in input_value
+            email = input_value if is_email else None
+            
             # First perform standard classification
             # Store original request
             original_request = request.json.copy()
@@ -362,8 +366,9 @@ def register_routes(app):
                 logger.warning(f"Classification failed with status {status_code}, skipping enrichment")
                 return classification_response
             
-            # Extract domain from classification result
+            # Extract domain and email from classification result
             domain = classification_result.get('domain')
+            email = classification_result.get('email')  # This will be set if the input was an email
             
             if not domain:
                 logger.error("No domain found in classification result")
@@ -371,10 +376,19 @@ def register_routes(app):
             
             # Import Apollo connector here to avoid circular imports
             from domain_classifier.enrichment.apollo_connector import ApolloConnector
+            from domain_classifier.enrichment.description_enhancer import enhance_company_description, generate_detailed_description
             
-            # Enrich with Apollo data
+            # Initialize Apollo connector
             apollo = ApolloConnector()
-            enrichment_data = apollo.enrich_company(domain)
+            
+            # Enrich with Apollo company data
+            company_data = apollo.enrich_company(domain)
+            
+            # If we have an email, also get person data
+            person_data = None
+            if email:
+                logger.info(f"Looking up person data for email: {email}")
+                person_data = apollo.search_person(email)
             
             # Import recommendation engine
             from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
@@ -383,11 +397,42 @@ def register_routes(app):
             recommendation_engine = DomotzRecommendationEngine()
             recommendations = recommendation_engine.generate_recommendations(
                 classification_result.get('predicted_class'),
-                enrichment_data
+                company_data
             )
             
+            # Step 1: First enhance with Apollo data
+            if company_data:
+                logger.info(f"Enhancing description with Apollo data for {domain}")
+                basic_enhanced_description = enhance_company_description(
+                    classification_result.get("company_description", ""),
+                    company_data,
+                    classification_result
+                )
+                classification_result["company_description"] = basic_enhanced_description
+            
+            # Step 2: Then use Claude to generate a more detailed description
+            try:
+                detailed_description = generate_detailed_description(
+                    classification_result,
+                    company_data,
+                    person_data
+                )
+                
+                if detailed_description and len(detailed_description) > 50:
+                    classification_result["company_description"] = detailed_description
+                    logger.info(f"Updated description with detailed Claude-generated version for {domain}")
+            except Exception as desc_error:
+                logger.error(f"Error generating detailed description: {desc_error}")
+                # Keep the basic enhanced description if the detailed one fails
+            
             # Add enrichment data to classification result
-            classification_result['apollo_data'] = enrichment_data or {}
+            classification_result['apollo_data'] = company_data or {}
+            
+            # Add person data if available
+            if person_data:
+                classification_result['apollo_person_data'] = person_data
+            
+            # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
             
             # Return the enriched result
