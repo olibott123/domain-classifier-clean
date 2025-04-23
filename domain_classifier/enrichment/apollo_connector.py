@@ -40,20 +40,18 @@ class ApolloConnector:
             # Apollo's organizations/enrich endpoint
             endpoint = f"{self.base_url}/organizations/enrich"
             
-            # Try both authentication methods
-            # Method 1: API key in payload (original)
+            # Use the X-Api-Key header as required by Apollo
+            headers = {
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "X-Api-Key": self.api_key  # This is the correct header format
+            }
+            
             payload = {
-                "api_key": self.api_key,
                 "domain": domain
             }
             
-            headers = {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache"
-            }
-            
             logger.info(f"Attempting to enrich data for domain: {domain}")
-            logger.debug(f"Using endpoint: {endpoint}")
             
             response = requests.post(endpoint, json=payload, headers=headers, timeout=15)
             
@@ -74,42 +72,6 @@ class ApolloConnector:
                 except:
                     logger.error(f"Apollo API error ({response.status_code}) for {domain}: {response.text[:500]}")
                 
-                # Try alternative authentication method if first method failed
-                if response.status_code in [401, 403, 422]:
-                    logger.info(f"Trying alternative authentication method for {domain}")
-                    # Method 2: API key in Authorization header
-                    alt_headers = {
-                        "Content-Type": "application/json",
-                        "Cache-Control": "no-cache",
-                        "Authorization": f"Bearer {self.api_key}"
-                    }
-                    
-                    alt_payload = {
-                        "domain": domain
-                    }
-                    
-                    logger.debug("Using Bearer token authentication")
-                    
-                    alt_response = requests.post(endpoint, json=alt_payload, headers=alt_headers, timeout=15)
-                    
-                    if alt_response.status_code == 200:
-                        alt_data = alt_response.json()
-                        
-                        if alt_data.get('organization'):
-                            logger.info(f"Successfully enriched {domain} with Apollo data using alternative auth")
-                            return self._format_company_data(alt_data['organization'])
-                        else:
-                            logger.warning(f"Apollo API alternative auth returned 200 but no organization data for {domain}")
-                    else:
-                        # Log details of alternative auth failure
-                        try:
-                            alt_error_details = alt_response.json()
-                            logger.error(f"Apollo API alternative auth error ({alt_response.status_code}) for {domain}: {alt_error_details}")
-                        except:
-                            logger.error(f"Apollo API alternative auth error ({alt_response.status_code}) for {domain}: {alt_response.text[:500]}")
-                
-            # If we got to this point, both methods failed
-            logger.warning(f"Could not retrieve Apollo data for {domain} after trying multiple methods")
             return None
             
         except requests.exceptions.Timeout:
@@ -199,16 +161,17 @@ class ApolloConnector:
             # Apollo's people/search endpoint
             endpoint = f"{self.base_url}/people/search"
             
+            # Use the X-Api-Key header as required by Apollo
+            headers = {
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "X-Api-Key": self.api_key
+            }
+            
             payload = {
-                "api_key": self.api_key,
                 "q_person_email": email,
                 "page": 1,
                 "per_page": 1
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache"
             }
             
             logger.info(f"Searching for person with email: {email}")
