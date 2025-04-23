@@ -66,6 +66,7 @@ class VectorDBConnector:
         # Set up Anthropic client if API key is available
         if self.anthropic_api_key:
             try:
+                # Fixed: simplified Anthropic client initialization
                 self.anthropic_client = anthropic.Anthropic(
                     api_key=self.anthropic_api_key
                 )
@@ -108,7 +109,7 @@ class VectorDBConnector:
                 logger.error(f"❌ Error listing Pinecone indexes: {e}")
                 logger.error(traceback.format_exc())
                 return
-            
+                
             # If index exists, connect to it
             if self.index_name in existing_indexes:
                 logger.info(f"✅ Found existing Pinecone index: {self.index_name}")
@@ -132,9 +133,26 @@ class VectorDBConnector:
                     logger.error(traceback.format_exc())
                     return
             else:
-                logger.warning(f"❌ Index {self.index_name} does not exist in available indexes: {existing_indexes}")
-                # Disabling automatic index creation as it could be causing startup issues
-                self.connected = False
+                # If index doesn't exist, create it
+                logger.info(f"Index {self.index_name} does not exist. Creating it now...")
+                try:
+                    # Create a new index with 227 dimensions (matching your existing schema)
+                    pinecone.create_index(
+                        name=self.index_name,
+                        dimension=227,
+                        metric="cosine"
+                    )
+                    logger.info(f"✅ Successfully created Pinecone index: {self.index_name}")
+                    
+                    # Connect to the newly created index
+                    self.index = pinecone.Index(self.index_name)
+                    self.connected = True
+                    logger.info("✅ Successfully connected to new Pinecone index")
+                except Exception as e:
+                    logger.error(f"❌ Error creating Pinecone index: {e}")
+                    logger.error(traceback.format_exc())
+                    self.connected = False
+                    return
                 
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
