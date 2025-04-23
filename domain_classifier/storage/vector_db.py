@@ -4,73 +4,77 @@ import os
 import json
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
-import numpy as np
 import traceback
+import numpy as np
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
+# Global flag to track availability
+PINECONE_AVAILABLE = False
+ANTHROPIC_AVAILABLE = False
+
 try:
     # Import Pinecone
     import pinecone
-    from pinecone import Pinecone, ServerlessSpec
-    from pinecone import Config, PodSpec
-    
-    # Import embedding model
-    import openai
-    
+    from pinecone import Pinecone
     PINECONE_AVAILABLE = True
 except ImportError:
-    logger.warning("Pinecone or OpenAI not available, vector storage will be disabled")
-    PINECONE_AVAILABLE = False
+    logger.warning("Pinecone not available, vector storage will be disabled")
+    
+try:
+    # Import Anthropic for embeddings
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    logger.warning("Anthropic not available, embeddings will be disabled")
 
 class VectorDBConnector:
     def __init__(self, 
                  api_key: str = None, 
-                 index_name: str = None,
-                 embedding_model: str = "text-embedding-3-small"):
+                 index_name: str = None):
         """
         Initialize the Pinecone vector database connector.
         
         Args:
             api_key: The API key for Pinecone
             index_name: The name of the Pinecone index to use
-            embedding_model: The OpenAI model to use for embeddings
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-classification")
-        self.embedding_model = embedding_model
-        self.openai_api_key = os.environ.get("OPENAI_API_KEY")
+        self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.connected = False
         self.client = None
         self.index = None
+        self.anthropic_client = None
         
-        # Set up OpenAI client if API key is available
-        if self.openai_api_key:
+        # Don't even try if dependencies aren't available
+        if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
+            logger.warning("Pinecone or Anthropic not available, vector storage disabled")
+            return
+            
+        # Set up Anthropic client if API key is available
+        if self.anthropic_api_key:
             try:
-                openai.api_key = self.openai_api_key
-                # Using new OpenAI client
-                from openai import OpenAI
-                self.openai_client = OpenAI(api_key=self.openai_api_key)
-                logger.info("OpenAI client initialized")
+                self.anthropic_client = anthropic.Anthropic(
+                    api_key=self.anthropic_api_key
+                )
+                logger.info("Anthropic client initialized")
             except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {e}")
-                self.openai_client = None
+                logger.error(f"Failed to initialize Anthropic client: {e}")
+                self.anthropic_client = None
         else:
-            logger.warning("No OpenAI API key provided, embeddings will not be available")
-            self.openai_client = None
+            logger.warning("No Anthropic API key provided, embeddings will not be available")
         
         # Initialize connection to Pinecone if API key is available
-        if self.api_key and PINECONE_AVAILABLE:
+        if self.api_key:
             try:
                 self._init_connection()
             except Exception as e:
                 logger.error(f"Failed to initialize Pinecone connection: {e}")
                 self.connected = False
         else:
-            if not self.api_key:
-                logger.warning("No Pinecone API key provided, vector storage will not be available")
-            self.connected = False
+            logger.warning("No Pinecone API key provided, vector storage will not be available")
     
     def _init_connection(self):
         """Initialize the connection to Pinecone."""
@@ -78,50 +82,34 @@ class VectorDBConnector:
             # Initialize Pinecone client
             self.client = Pinecone(api_key=self.api_key)
             
-            # Check if index exists
-            existing_indexes = [index.name for index in self.client.list_indexes()]
+            # Check if index exists - safely
+            try:
+                existing_indexes = [index.name for index in self.client.list_indexes()]
+            except Exception as e:
+                logger.error(f"Error listing indexes: {e}")
+                return
             
+            # If index exists, connect to it
             if self.index_name in existing_indexes:
                 logger.info(f"Found existing Pinecone index: {self.index_name}")
-                self.index = self.client.Index(self.index_name)
-                self.connected = True
-            else:
-                logger.info(f"Creating new Pinecone index: {self.index_name}")
-                # Create index with 1536 dimensions (OpenAI embedding dimension)
                 try:
-                    # First try serverless (preferred for new deployments)
-                    self.client.create_index(
-                        name=self.index_name,
-                        dimension=1536,
-                        metric="cosine",
-                        spec=ServerlessSpec(
-                            cloud="aws",
-                            region="us-west-2"
-                        )
-                    )
+                    self.index = self.client.Index(self.index_name)
+                    self.connected = True
                 except Exception as e:
-                    logger.warning(f"Failed to create serverless index, falling back to pod-based: {e}")
-                    # Fallback to pod-based
-                    self.client.create_index(
-                        name=self.index_name, 
-                        dimension=1536,
-                        metric="cosine",
-                        spec=PodSpec(
-                            environment="gcp-starter"
-                        )
-                    )
+                    logger.error(f"Error connecting to index: {e}")
+                    return
+            else:
+                logger.warning(f"Index {self.index_name} does not exist and won't be created automatically")
+                # Disabling automatic index creation as it could be causing startup issues
+                self.connected = False
                 
-                # Connect to the newly created index
-                self.index = self.client.Index(self.index_name)
-                self.connected = True
         except Exception as e:
             logger.error(f"Error connecting to Pinecone: {e}")
             self.connected = False
-            raise
     
     def create_embedding(self, text: str) -> Optional[List[float]]:
         """
-        Create an embedding for the given text using OpenAI.
+        Create an embedding for the given text using Anthropic.
         
         Args:
             text: The text to embed
@@ -129,27 +117,106 @@ class VectorDBConnector:
         Returns:
             list: The embedding vector or None if failed
         """
-        if not self.openai_client:
-            logger.warning("OpenAI client not available, cannot create embedding")
+        if not self.anthropic_client:
+            logger.warning("Anthropic client not available, cannot create embedding")
             return None
             
         try:
-            # Truncate text if it's too long
-            if len(text) > 25000:  # OpenAI has token limits
-                logger.warning(f"Text too long ({len(text)} chars), truncating to 25000 chars")
-                text = text[:25000]
+            # Truncate text if it's too long (Anthropic also has token limits)
+            if len(text) > 20000:
+                logger.warning(f"Text too long ({len(text)} chars), truncating to 20000 chars")
+                text = text[:20000]
             
-            # Create embedding
-            response = self.openai_client.embeddings.create(
-                input=text,
-                model=self.embedding_model
-            )
+            # Use Anthropic to generate a summary and then create a simple embedding
+            # Since Anthropic doesn't have a direct embedding API, we'll use Claude to extract key features
+            # and create a simplified embedding
             
-            # Extract embedding from response
-            embedding = response.data[0].embedding
+            prompt = f"""Given the following text, extract the 10-15 most important keywords or phrases that represent the main topics and concepts. For each keyword, assign a relevance score from 0 to 1. Return the results as a JSON array of objects with 'keyword' and 'score' properties.
+
+Text to analyze:
+{text}
+
+The JSON output should be formatted exactly like this:
+[
+  {{"keyword": "example keyword 1", "score": 0.95}},
+  {{"keyword": "example keyword 2", "score": 0.85}}
+]
+
+Do not include any other text in your response, just the JSON data.
+"""
             
-            logger.info(f"Created embedding with {len(embedding)} dimensions")
-            return embedding
+            # Call Claude to extract features
+            try:
+                response = self.anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=1000,
+                    temperature=0,
+                    system="You analyze text and extract the most important keywords with relevance scores. Output only valid JSON.",
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                # Extract the JSON response
+                json_text = response.content[0].text
+                
+                # Clean up the JSON text to ensure it's valid
+                json_text = json_text.strip()
+                if json_text.startswith("```json"):
+                    json_text = json_text.replace("```json", "", 1)
+                if json_text.endswith("```"):
+                    json_text = json_text[:-3]
+                json_text = json_text.strip()
+                
+                # Parse the JSON
+                try:
+                    keywords = json.loads(json_text)
+                    
+                    # Convert to a simple vector
+                    # We'll create a fixed-size vector of 1536 dimensions (same as OpenAI embeddings)
+                    # each dimension representing a feature
+                    
+                    # Create a seed for consistent hashing
+                    np.random.seed(42)
+                    
+                    # Initialize the embedding vector
+                    embedding = np.zeros(1536)
+                    
+                    # For each keyword, create a random vector and multiply by its score
+                    for item in keywords:
+                        keyword = item.get("keyword", "")
+                        score = item.get("score", 0.5)
+                        
+                        # Create a hash of the keyword
+                        keyword_hash = int(hashlib.md5(keyword.encode()).hexdigest(), 16)
+                        
+                        # Use the hash to seed a random vector
+                        np.random.seed(keyword_hash)
+                        keyword_vector = np.random.normal(0, 1, 1536)
+                        
+                        # Add the weighted keyword vector to the embedding
+                        embedding += keyword_vector * score
+                    
+                    # Normalize the embedding
+                    norm = np.linalg.norm(embedding)
+                    if norm > 0:
+                        embedding = embedding / norm
+                    
+                    # Convert to list and return
+                    embedding_list = embedding.tolist()
+                    
+                    logger.info(f"Created embedding with {len(embedding_list)} dimensions")
+                    return embedding_list
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error parsing JSON response: {e}")
+                    logger.error(f"Raw response: {json_text}")
+                    return None
+                
+            except Exception as e:
+                logger.error(f"Error calling Anthropic: {e}")
+                return None
+                
         except Exception as e:
             logger.error(f"Error creating embedding: {e}")
             return None
