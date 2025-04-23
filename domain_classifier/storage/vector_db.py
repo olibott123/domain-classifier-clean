@@ -15,12 +15,11 @@ PINECONE_AVAILABLE = False
 ANTHROPIC_AVAILABLE = False
 
 try:
-    # Import Pinecone with detailed error logging
+    # Import Pinecone with detailed error logging (for older version)
     logger.info("Attempting to import pinecone-client...")
     import pinecone
-    from pinecone import Pinecone
     PINECONE_AVAILABLE = True
-    logger.info("✅ Pinecone library successfully imported")
+    logger.info(f"✅ Pinecone library successfully imported (version: {pinecone.__version__})")
 except Exception as e:
     logger.error(f"❌ Error importing Pinecone: {str(e)}")
     logger.error(traceback.format_exc())
@@ -52,7 +51,6 @@ class VectorDBConnector:
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.connected = False
-        self.client = None
         self.index = None
         self.anthropic_client = None
         
@@ -92,16 +90,19 @@ class VectorDBConnector:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
     
     def _init_connection(self):
-        """Initialize the connection to Pinecone."""
+        """Initialize the connection to Pinecone using older API."""
         try:
-            # Initialize Pinecone client
-            logger.info("Creating Pinecone client...")
-            self.client = Pinecone(api_key=self.api_key)
+            # Initialize Pinecone client (older API style)
+            logger.info("Initializing Pinecone connection...")
+            pinecone.init(
+                api_key=self.api_key,
+                environment="gcp-starter"  # You might need to adjust this
+            )
             
             # Check if index exists - safely
             try:
                 logger.info("Listing available Pinecone indexes...")
-                existing_indexes = [index.name for index in self.client.list_indexes()]
+                existing_indexes = pinecone.list_indexes()
                 logger.info(f"Available Pinecone indexes: {existing_indexes}")
             except Exception as e:
                 logger.error(f"❌ Error listing Pinecone indexes: {e}")
@@ -112,15 +113,16 @@ class VectorDBConnector:
             if self.index_name in existing_indexes:
                 logger.info(f"✅ Found existing Pinecone index: {self.index_name}")
                 try:
-                    self.index = self.client.Index(self.index_name)
+                    # For the older API, we just use this reference
+                    self.index = pinecone.Index(self.index_name)
                     self.connected = True
                     logger.info("✅ Successfully connected to Pinecone index")
                     
                     # Try to get index stats to confirm connection is working
                     try:
-                        stats = self.index.describe_index_stats()
-                        vector_count = stats.get("total_vector_count", 0)
-                        logger.info(f"Index contains {vector_count} vectors")
+                        stats = pinecone.describe_index(self.index_name)
+                        dimension = stats.get("dimension", 0)
+                        logger.info(f"Index dimension: {dimension}")
                     except Exception as e:
                         logger.warning(f"Could not get index stats: {e}")
                         logger.warning(traceback.format_exc())
@@ -316,7 +318,7 @@ Do not include any other text in your response, just the JSON data.
             # Include key information in log
             logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class')}")
             
-            # Upsert vector
+            # Upsert vector (for older API)
             self.index.upsert(
                 vectors=[(vector_id, embedding, sanitized_metadata)]
             )
@@ -354,7 +356,7 @@ Do not include any other text in your response, just the JSON data.
                 logger.warning("❌ Failed to create embedding for query")
                 return []
             
-            # Query Pinecone
+            # Query Pinecone (for older API)
             results = self.index.query(
                 vector=embedding,
                 top_k=top_k,
@@ -362,17 +364,17 @@ Do not include any other text in your response, just the JSON data.
                 filter=filter
             )
             
-            # Process results
+            # Process results - older API has slightly different format
             similar_domains = []
-            for match in results.matches:
+            for match in results.get('matches', []):
                 # Extract metadata
-                metadata = match.metadata or {}
+                metadata = match.get('metadata', {})
                 domain = metadata.get("domain", "unknown")
                 
                 # Create result object
                 result = {
                     "domain": domain,
-                    "score": match.score,
+                    "score": match.get('score', 0),
                     "metadata": metadata
                 }
                 
@@ -410,9 +412,5 @@ Do not include any other text in your response, just the JSON data.
             return True
         except Exception as e:
             logger.error(f"❌ Error deleting vector for {domain}: {e}")
-            logger.error(traceback.format_exc())
-            return False
-        except Exception as e:
-            logger.error(f"❌ Error upserting vector for {domain}: {e}")
             logger.error(traceback.format_exc())
             return False
