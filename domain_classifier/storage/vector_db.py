@@ -15,21 +15,26 @@ PINECONE_AVAILABLE = False
 ANTHROPIC_AVAILABLE = False
 
 try:
-    # Import Pinecone
+    # Import Pinecone with detailed error logging
+    logger.info("Attempting to import pinecone-client...")
     import pinecone
     from pinecone import Pinecone
     PINECONE_AVAILABLE = True
     logger.info("✅ Pinecone library successfully imported")
-except ImportError:
-    logger.warning("❌ Pinecone not available, vector storage will be disabled")
+except Exception as e:
+    logger.error(f"❌ Error importing Pinecone: {str(e)}")
+    logger.error(traceback.format_exc())
+    PINECONE_AVAILABLE = False
     
 try:
     # Import Anthropic for embeddings
     import anthropic
     ANTHROPIC_AVAILABLE = True
     logger.info("✅ Anthropic library successfully imported")
-except ImportError:
-    logger.warning("❌ Anthropic not available, embeddings will be disabled")
+except Exception as e:
+    logger.error(f"❌ Error importing Anthropic: {str(e)}")
+    logger.error(traceback.format_exc())
+    ANTHROPIC_AVAILABLE = False
 
 class VectorDBConnector:
     def __init__(self, 
@@ -43,7 +48,8 @@ class VectorDBConnector:
             index_name: The name of the Pinecone index to use
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
-        self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-classification")
+        # Use domain-embeddings to match existing index
+        self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.connected = False
         self.client = None
@@ -68,6 +74,7 @@ class VectorDBConnector:
                 logger.info("✅ Anthropic client initialized successfully")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Anthropic client: {e}")
+                logger.error(traceback.format_exc())
                 self.anthropic_client = None
         else:
             logger.warning("No Anthropic API key provided, embeddings will not be available")
@@ -79,6 +86,7 @@ class VectorDBConnector:
                 self._init_connection()
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Pinecone connection: {e}")
+                logger.error(traceback.format_exc())
                 self.connected = False
         else:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
@@ -97,6 +105,7 @@ class VectorDBConnector:
                 logger.info(f"Available Pinecone indexes: {existing_indexes}")
             except Exception as e:
                 logger.error(f"❌ Error listing Pinecone indexes: {e}")
+                logger.error(traceback.format_exc())
                 return
             
             # If index exists, connect to it
@@ -114,17 +123,20 @@ class VectorDBConnector:
                         logger.info(f"Index contains {vector_count} vectors")
                     except Exception as e:
                         logger.warning(f"Could not get index stats: {e}")
+                        logger.warning(traceback.format_exc())
                         
                 except Exception as e:
                     logger.error(f"❌ Error connecting to index: {e}")
+                    logger.error(traceback.format_exc())
                     return
             else:
-                logger.warning(f"❌ Index {self.index_name} does not exist and won't be created automatically")
+                logger.warning(f"❌ Index {self.index_name} does not exist in available indexes: {existing_indexes}")
                 # Disabling automatic index creation as it could be causing startup issues
                 self.connected = False
                 
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
+            logger.error(traceback.format_exc())
             self.connected = False
     
     def create_embedding(self, text: str) -> Optional[List[float]]:
@@ -151,9 +163,6 @@ class VectorDBConnector:
             logger.info(f"Creating embedding for text of length {len(text)} chars...")
             
             # Use Anthropic to generate a summary and then create a simple embedding
-            # Since Anthropic doesn't have a direct embedding API, we'll use Claude to extract key features
-            # and create a simplified embedding
-            
             prompt = f"""Given the following text, extract the 10-15 most important keywords or phrases that represent the main topics and concepts. For each keyword, assign a relevance score from 0 to 1. Return the results as a JSON array of objects with 'keyword' and 'score' properties.
 
 Text to analyze:
@@ -197,15 +206,12 @@ Do not include any other text in your response, just the JSON data.
                     keywords = json.loads(json_text)
                     logger.info(f"✅ Successfully extracted {len(keywords)} keywords from text")
                     
-                    # Convert to a simple vector
-                    # We'll create a fixed-size vector of 1536 dimensions (same as OpenAI embeddings)
-                    # each dimension representing a feature
-                    
+                    # Create a vector with 227 dimensions to match existing index
                     # Create a seed for consistent hashing
                     np.random.seed(42)
                     
-                    # Initialize the embedding vector
-                    embedding = np.zeros(1536)
+                    # Initialize the embedding vector (227 dimensions)
+                    embedding = np.zeros(227)
                     
                     # For each keyword, create a random vector and multiply by its score
                     for item in keywords:
@@ -217,7 +223,7 @@ Do not include any other text in your response, just the JSON data.
                         
                         # Use the hash to seed a random vector
                         np.random.seed(keyword_hash)
-                        keyword_vector = np.random.normal(0, 1, 1536)
+                        keyword_vector = np.random.normal(0, 1, 227)  # 227 dimensions to match index
                         
                         # Add the weighted keyword vector to the embedding
                         embedding += keyword_vector * score
@@ -240,10 +246,12 @@ Do not include any other text in your response, just the JSON data.
                 
             except Exception as e:
                 logger.error(f"❌ Error calling Anthropic: {e}")
+                logger.error(traceback.format_exc())
                 return None
                 
         except Exception as e:
             logger.error(f"❌ Error creating embedding: {e}")
+            logger.error(traceback.format_exc())
             return None
     
     def generate_vector_id(self, domain: str, content_type: str = "domain") -> str:
@@ -315,6 +323,95 @@ Do not include any other text in your response, just the JSON data.
             
             logger.info(f"✅ Successfully upserted vector for domain {domain} to Pinecone!")
             return True
+        except Exception as e:
+            logger.error(f"❌ Error upserting vector for {domain}: {e}")
+            logger.error(traceback.format_exc())
+            return False
+            
+    def query_similar_domains(self, 
+                            query_text: str, 
+                            top_k: int = 5, 
+                            filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Query Pinecone for domains similar to the given text.
+        
+        Args:
+            query_text: The text to find similar domains for
+            top_k: The number of results to return
+            filter: Optional filter for the query
+            
+        Returns:
+            list: List of similar domains with metadata
+        """
+        if not self.connected or not self.index:
+            logger.warning("❌ Not connected to Pinecone, cannot query similar domains")
+            return []
+            
+        try:
+            # Create embedding
+            embedding = self.create_embedding(query_text)
+            if not embedding:
+                logger.warning("❌ Failed to create embedding for query")
+                return []
+            
+            # Query Pinecone
+            results = self.index.query(
+                vector=embedding,
+                top_k=top_k,
+                include_metadata=True,
+                filter=filter
+            )
+            
+            # Process results
+            similar_domains = []
+            for match in results.matches:
+                # Extract metadata
+                metadata = match.metadata or {}
+                domain = metadata.get("domain", "unknown")
+                
+                # Create result object
+                result = {
+                    "domain": domain,
+                    "score": match.score,
+                    "metadata": metadata
+                }
+                
+                similar_domains.append(result)
+            
+            logger.info(f"✅ Found {len(similar_domains)} similar domains")
+            return similar_domains
+        except Exception as e:
+            logger.error(f"❌ Error querying similar domains: {e}")
+            logger.error(traceback.format_exc())
+            return []
+            
+    def delete_domain_vector(self, domain: str) -> bool:
+        """
+        Delete a domain vector from Pinecone.
+        
+        Args:
+            domain: The domain to delete
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.connected or not self.index:
+            logger.warning(f"❌ Not connected to Pinecone, cannot delete vector for {domain}")
+            return False
+            
+        try:
+            # Generate ID
+            vector_id = self.generate_vector_id(domain)
+            
+            # Delete vector
+            self.index.delete(ids=[vector_id])
+            
+            logger.info(f"✅ Deleted vector for domain {domain}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error deleting vector for {domain}: {e}")
+            logger.error(traceback.format_exc())
+            return False
         except Exception as e:
             logger.error(f"❌ Error upserting vector for {domain}: {e}")
             logger.error(traceback.format_exc())
