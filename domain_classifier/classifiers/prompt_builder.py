@@ -156,14 +156,14 @@ Here are examples of correctly classified companies:"""
                 snippet = example.get('content', '')[:300].replace('\n', ' ').strip()
                 system_prompt += f"\nDomain: {example.get('domain', 'example.com')}\nContent snippet: {snippet}...\nClassification: {category}\n"
     
-    # Add instructions for output format
+    # Add instructions for output format with enhanced company description requirement
     system_prompt += """\n\nYou MUST provide your analysis in JSON format with the following structure:
 {
   "processing_status": [0 if processing failed, 1 if domain is parked, 2 if classification successful],
   "is_service_business": [true/false - whether this is a service/management business],
   "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Internal IT Department" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
   "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: 0],
-  "company_description": [A clear 1-2 sentence description of what the company actually does - their products/services/industry],
+  "company_description": [A clear, detailed paragraph (75-100 words) describing what the company actually does. Include specific services, target markets, approach, and any distinctive attributes. Be specific rather than generic.],
   "confidence_scores": {
     "Integrator - Commercial A/V": [Integer from 1-100, only relevant if is_service_business=true],
     "Integrator - Residential A/V": [Integer from 1-100, only relevant if is_service_business=true],
@@ -183,7 +183,7 @@ IMPORTANT INSTRUCTIONS:
 7. Mention specific evidence from the text that supports your classification.
 8. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as Internal IT Department, not as an MSP.
 9. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
-10. The company_description should be 1-2 sentences focusing on what the company actually does, not on the classification process.
+10. The company_description should be 1-2 substantive paragraphs (75-100 words) focusing on what the company actually does, their specific services or products, target markets, and unique attributes. Avoid vague, generic descriptions.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
 
