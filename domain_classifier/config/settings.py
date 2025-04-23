@@ -5,6 +5,7 @@ import os
 APIFY_TASK_ID = os.environ.get("APIFY_TASK_ID")
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+APOLLO_API_KEY = os.environ.get("APOLLO_API_KEY")
 
 # Configuration
 LOW_CONFIDENCE_THRESHOLD = 0.7  # Threshold below which we consider a classification "low confidence"
