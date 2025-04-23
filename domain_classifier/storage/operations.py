@@ -1,7 +1,7 @@
 """Storage operations for domain classification."""
 import logging
 import json
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import traceback
 
 # Set up logging
@@ -165,3 +165,57 @@ def save_to_vector_db(domain: str, url: str, content: str, classification: Dict[
         logger.error(f"Error saving to vector DB: {e}")
         logger.error(traceback.format_exc())
         return False
+
+def query_similar_domains(query_text: str, top_k: int = 5, filter=None, vector_db_conn=None):
+    """
+    Query for domains similar to the given text.
+    
+    Args:
+        query_text: The text to find similar domains for
+        top_k: The number of results to return
+        filter: Optional filter criteria
+        vector_db_conn: Optional vector DB connector instance
+    
+    Returns:
+        list: List of similar domains with metadata
+    """
+    try:
+        # If Pinecone or Anthropic aren't available, just return empty
+        try:
+            from domain_classifier.storage.vector_db import PINECONE_AVAILABLE, ANTHROPIC_AVAILABLE
+            if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
+                logger.info("Pinecone or Anthropic not available, cannot query similar domains")
+                return []
+        except ImportError:
+            logger.info("Vector DB module not available, cannot query similar domains")
+            return []
+            
+        # If no connector is provided, import and create one
+        if vector_db_conn is None:
+            try:
+                from domain_classifier.storage.vector_db import VectorDBConnector
+                vector_db_conn = VectorDBConnector()
+            except Exception as e:
+                logger.error(f"Error creating VectorDBConnector: {e}")
+                logger.error(traceback.format_exc())
+                return []
+                
+        # Skip if not connected to vector DB
+        if not getattr(vector_db_conn, 'connected', False):
+            logger.info("Vector DB not connected, cannot query similar domains")
+            return []
+            
+        # Call the vector DB to get similar domains
+        logger.info(f"Querying vector DB for domains similar to: {query_text[:50]}...")
+        similar_domains = vector_db_conn.query_similar_domains(
+            query_text=query_text,
+            top_k=top_k,
+            filter=filter
+        )
+        
+        logger.info(f"Found {len(similar_domains)} similar domains")
+        return similar_domains
+    except Exception as e:
+        logger.error(f"Error querying similar domains: {e}")
+        logger.error(traceback.format_exc())
+        return []
