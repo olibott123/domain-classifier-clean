@@ -19,15 +19,17 @@ try:
     import pinecone
     from pinecone import Pinecone
     PINECONE_AVAILABLE = True
+    logger.info("✅ Pinecone library successfully imported")
 except ImportError:
-    logger.warning("Pinecone not available, vector storage will be disabled")
+    logger.warning("❌ Pinecone not available, vector storage will be disabled")
     
 try:
     # Import Anthropic for embeddings
     import anthropic
     ANTHROPIC_AVAILABLE = True
+    logger.info("✅ Anthropic library successfully imported")
 except ImportError:
-    logger.warning("Anthropic not available, embeddings will be disabled")
+    logger.warning("❌ Anthropic not available, embeddings will be disabled")
 
 class VectorDBConnector:
     def __init__(self, 
@@ -48,9 +50,13 @@ class VectorDBConnector:
         self.index = None
         self.anthropic_client = None
         
+        logger.info(f"Initializing VectorDBConnector with index: {self.index_name}")
+        logger.info(f"PINECONE_API_KEY available: {bool(self.api_key)}")
+        logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
+        
         # Don't even try if dependencies aren't available
         if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
-            logger.warning("Pinecone or Anthropic not available, vector storage disabled")
+            logger.warning("❌ Pinecone or Anthropic not available, vector storage disabled")
             return
             
         # Set up Anthropic client if API key is available
@@ -59,9 +65,9 @@ class VectorDBConnector:
                 self.anthropic_client = anthropic.Anthropic(
                     api_key=self.anthropic_api_key
                 )
-                logger.info("Anthropic client initialized")
+                logger.info("✅ Anthropic client initialized successfully")
             except Exception as e:
-                logger.error(f"Failed to initialize Anthropic client: {e}")
+                logger.error(f"❌ Failed to initialize Anthropic client: {e}")
                 self.anthropic_client = None
         else:
             logger.warning("No Anthropic API key provided, embeddings will not be available")
@@ -69,9 +75,10 @@ class VectorDBConnector:
         # Initialize connection to Pinecone if API key is available
         if self.api_key:
             try:
+                logger.info("Attempting to connect to Pinecone...")
                 self._init_connection()
             except Exception as e:
-                logger.error(f"Failed to initialize Pinecone connection: {e}")
+                logger.error(f"❌ Failed to initialize Pinecone connection: {e}")
                 self.connected = False
         else:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
@@ -80,31 +87,44 @@ class VectorDBConnector:
         """Initialize the connection to Pinecone."""
         try:
             # Initialize Pinecone client
+            logger.info("Creating Pinecone client...")
             self.client = Pinecone(api_key=self.api_key)
             
             # Check if index exists - safely
             try:
+                logger.info("Listing available Pinecone indexes...")
                 existing_indexes = [index.name for index in self.client.list_indexes()]
+                logger.info(f"Available Pinecone indexes: {existing_indexes}")
             except Exception as e:
-                logger.error(f"Error listing indexes: {e}")
+                logger.error(f"❌ Error listing Pinecone indexes: {e}")
                 return
             
             # If index exists, connect to it
             if self.index_name in existing_indexes:
-                logger.info(f"Found existing Pinecone index: {self.index_name}")
+                logger.info(f"✅ Found existing Pinecone index: {self.index_name}")
                 try:
                     self.index = self.client.Index(self.index_name)
                     self.connected = True
+                    logger.info("✅ Successfully connected to Pinecone index")
+                    
+                    # Try to get index stats to confirm connection is working
+                    try:
+                        stats = self.index.describe_index_stats()
+                        vector_count = stats.get("total_vector_count", 0)
+                        logger.info(f"Index contains {vector_count} vectors")
+                    except Exception as e:
+                        logger.warning(f"Could not get index stats: {e}")
+                        
                 except Exception as e:
-                    logger.error(f"Error connecting to index: {e}")
+                    logger.error(f"❌ Error connecting to index: {e}")
                     return
             else:
-                logger.warning(f"Index {self.index_name} does not exist and won't be created automatically")
+                logger.warning(f"❌ Index {self.index_name} does not exist and won't be created automatically")
                 # Disabling automatic index creation as it could be causing startup issues
                 self.connected = False
                 
         except Exception as e:
-            logger.error(f"Error connecting to Pinecone: {e}")
+            logger.error(f"❌ Error connecting to Pinecone: {e}")
             self.connected = False
     
     def create_embedding(self, text: str) -> Optional[List[float]]:
@@ -118,14 +138,17 @@ class VectorDBConnector:
             list: The embedding vector or None if failed
         """
         if not self.anthropic_client:
-            logger.warning("Anthropic client not available, cannot create embedding")
+            logger.warning("❌ Anthropic client not available, cannot create embedding")
             return None
             
         try:
             # Truncate text if it's too long (Anthropic also has token limits)
-            if len(text) > 20000:
-                logger.warning(f"Text too long ({len(text)} chars), truncating to 20000 chars")
+            text_length = len(text)
+            if text_length > 20000:
+                logger.warning(f"Text too long ({text_length} chars), truncating to 20000 chars")
                 text = text[:20000]
+            
+            logger.info(f"Creating embedding for text of length {len(text)} chars...")
             
             # Use Anthropic to generate a summary and then create a simple embedding
             # Since Anthropic doesn't have a direct embedding API, we'll use Claude to extract key features
@@ -147,6 +170,7 @@ Do not include any other text in your response, just the JSON data.
             
             # Call Claude to extract features
             try:
+                logger.info("Calling Anthropic API to extract key features from text...")
                 response = self.anthropic_client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=1000,
@@ -171,6 +195,7 @@ Do not include any other text in your response, just the JSON data.
                 # Parse the JSON
                 try:
                     keywords = json.loads(json_text)
+                    logger.info(f"✅ Successfully extracted {len(keywords)} keywords from text")
                     
                     # Convert to a simple vector
                     # We'll create a fixed-size vector of 1536 dimensions (same as OpenAI embeddings)
@@ -205,20 +230,20 @@ Do not include any other text in your response, just the JSON data.
                     # Convert to list and return
                     embedding_list = embedding.tolist()
                     
-                    logger.info(f"Created embedding with {len(embedding_list)} dimensions")
+                    logger.info(f"✅ Created embedding with {len(embedding_list)} dimensions")
                     return embedding_list
                     
                 except json.JSONDecodeError as e:
-                    logger.error(f"Error parsing JSON response: {e}")
+                    logger.error(f"❌ Error parsing JSON response: {e}")
                     logger.error(f"Raw response: {json_text}")
                     return None
                 
             except Exception as e:
-                logger.error(f"Error calling Anthropic: {e}")
+                logger.error(f"❌ Error calling Anthropic: {e}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error creating embedding: {e}")
+            logger.error(f"❌ Error creating embedding: {e}")
             return None
     
     def generate_vector_id(self, domain: str, content_type: str = "domain") -> str:
@@ -252,18 +277,20 @@ Do not include any other text in your response, just the JSON data.
             bool: True if successful, False otherwise
         """
         if not self.connected or not self.index:
-            logger.warning(f"Not connected to Pinecone, cannot upsert vector for {domain}")
+            logger.warning(f"❌ Not connected to Pinecone, cannot upsert vector for {domain}")
             return False
             
         try:
             # Create embedding
+            logger.info(f"Creating embedding for domain: {domain}")
             embedding = self.create_embedding(content)
             if not embedding:
-                logger.warning(f"Failed to create embedding for {domain}")
+                logger.warning(f"❌ Failed to create embedding for {domain}")
                 return False
             
             # Generate ID
             vector_id = self.generate_vector_id(domain)
+            logger.info(f"Generated vector ID: {vector_id}")
             
             # Sanitize metadata (ensure all values are strings or numbers)
             sanitized_metadata = {}
@@ -278,97 +305,17 @@ Do not include any other text in your response, just the JSON data.
                 else:
                     sanitized_metadata[key] = str(value)
             
+            # Include key information in log
+            logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class')}")
+            
             # Upsert vector
             self.index.upsert(
                 vectors=[(vector_id, embedding, sanitized_metadata)]
             )
             
-            logger.info(f"Upserted vector for domain {domain}")
+            logger.info(f"✅ Successfully upserted vector for domain {domain} to Pinecone!")
             return True
         except Exception as e:
-            logger.error(f"Error upserting vector for {domain}: {e}")
+            logger.error(f"❌ Error upserting vector for {domain}: {e}")
             logger.error(traceback.format_exc())
-            return False
-    
-    def query_similar_domains(self, 
-                            query_text: str, 
-                            top_k: int = 5, 
-                            filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """
-        Query Pinecone for domains similar to the given text.
-        
-        Args:
-            query_text: The text to find similar domains for
-            top_k: The number of results to return
-            filter: Optional filter for the query
-            
-        Returns:
-            list: List of similar domains with metadata
-        """
-        if not self.connected or not self.index:
-            logger.warning("Not connected to Pinecone, cannot query similar domains")
-            return []
-            
-        try:
-            # Create embedding
-            embedding = self.create_embedding(query_text)
-            if not embedding:
-                logger.warning("Failed to create embedding for query")
-                return []
-            
-            # Query Pinecone
-            results = self.index.query(
-                vector=embedding,
-                top_k=top_k,
-                include_metadata=True,
-                filter=filter
-            )
-            
-            # Process results
-            similar_domains = []
-            for match in results.matches:
-                # Extract metadata
-                metadata = match.metadata or {}
-                domain = metadata.get("domain", "unknown")
-                
-                # Create result object
-                result = {
-                    "domain": domain,
-                    "score": match.score,
-                    "metadata": metadata
-                }
-                
-                similar_domains.append(result)
-            
-            logger.info(f"Found {len(similar_domains)} similar domains")
-            return similar_domains
-        except Exception as e:
-            logger.error(f"Error querying similar domains: {e}")
-            return []
-            
-    def delete_domain_vector(self, domain: str) -> bool:
-        """
-        Delete a domain vector from Pinecone.
-        
-        Args:
-            domain: The domain to delete
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.connected or not self.index:
-            logger.warning(f"Not connected to Pinecone, cannot delete vector for {domain}")
-            return False
-            
-        try:
-            # Generate ID
-            vector_id = self.generate_vector_id(domain)
-            
-            # Delete vector
-            self.index.delete(ids=[vector_id])
-            
-            logger.info(f"Deleted vector for domain {domain}")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting vector for {domain}: {e}")
             return False
