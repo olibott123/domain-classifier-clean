@@ -46,18 +46,15 @@ class VectorDBConnector:
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
-        self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "aped-4627-b74a")
-        self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.host_url = os.environ.get("PINECONE_HOST_URL", "domain-embeddings-pia5rh5.svc.aped-4627-b74a.pinecone.io")
         self.connected = False
+        self.pc = None
         self.index = None
-        self.anthropic_client = None
 
         logger.info(f"Initializing VectorDBConnector with index: {self.index_name}")
         logger.info(f"PINECONE_API_KEY available: {bool(self.api_key)}")
-        logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
+        logger.info(f"ANTHROPIC_API_KEY available: {bool(os.environ.get('ANTHROPIC_API_KEY'))}")
         logger.info(f"Using Pinecone host: {self.host_url}")
-        logger.info(f"Using Pinecone environment: {self.environment}")
 
         if not PINECONE_AVAILABLE:
             logger.warning("❌ Pinecone not available, vector storage disabled")
@@ -80,34 +77,31 @@ class VectorDBConnector:
     def _init_connection(self):
         """Initialize the connection to Pinecone."""
         try:
-            # Basic initialization with only required parameters
-            logger.info(f"Initializing Pinecone with api_key={self.api_key[:5]}... and environment={self.environment}")
-            pinecone.init(api_key=self.api_key, environment=self.environment)
+            # Use the new Pinecone client API
+            logger.info(f"Initializing Pinecone with api_key={self.api_key[:5]}...")
+            
+            # Create the Pinecone client
+            from pinecone import Pinecone
+            self.pc = Pinecone(api_key=self.api_key)
+            
+            # Try to connect to the index
+            logger.info(f"Connecting to Pinecone index: {self.index_name} at host: {self.host_url}")
             
             try:
-                # Try to connect with explicit host parameter first
-                host = f"https://{self.host_url}"
-                logger.info(f"Connecting to Pinecone with host: {host}")
-                
-                try:
-                    # For newer versions
-                    self.index = pinecone.Index(name=self.index_name, host=host)
-                except TypeError:
-                    # For older versions
-                    self.index = pinecone.Index(index_name=self.index_name, host=host)
-                    
+                # Try the new approach with host parameter
+                self.index = self.pc.Index(host=self.host_url)
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index with host: {self.index_name}")
-            except Exception as e:
-                # Fall back to connection without host parameter
-                logger.info(f"Host parameter not supported, trying without it: {e}")
+            except Exception as e1:
+                logger.warning(f"Error connecting with host parameter: {e1}")
                 
                 try:
-                    self.index = pinecone.Index(self.index_name)
+                    # Try simpler approach with just index name
+                    self.index = self.pc.Index(self.index_name)
                     self.connected = True
-                    logger.info(f"✅ Successfully connected to Pinecone index without host: {self.index_name}")
+                    logger.info(f"✅ Successfully connected to Pinecone index by name: {self.index_name}")
                 except Exception as e2:
-                    logger.error(f"❌ Error connecting to index without host: {e2}")
+                    logger.error(f"❌ Error connecting to index by name: {e2}")
                     # Set connected to True anyway - we'll handle errors gracefully in operations
                     self.connected = True
                     self.index = None
@@ -218,65 +212,30 @@ class VectorDBConnector:
                 else:
                     sanitized_metadata[key] = str(value)
 
-            # Try all possible approaches to store the vector, but don't fail main functionality
+            # Try using the new API format
             try:
-                # Approach 1: Use the existing index connection
+                # Try with existing index connection
                 if self.index:
-                    try:
-                        logger.info(f"Attempting to upsert vector for {domain} using existing connection")
-                        self.index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
-                        logger.info(f"✅ Successfully upserted vector for {domain}")
-                        return True
-                    except Exception as e:
-                        logger.warning(f"❌ Error using existing connection: {e}")
-                        # Continue to next approach
-                
-                # Approach 2: Create a fresh connection
-                try:
-                    logger.info(f"Attempting direct upsert for {domain}")
-                    # Initialize Pinecone directly
-                    pinecone.init(api_key=self.api_key, environment=self.environment)
+                    logger.info(f"Attempting to upsert vector for {domain} using new Pinecone API")
                     
-                    # Create a fresh index connection
-                    direct_index = pinecone.Index(self.index_name)
+                    # Format the vector in the new expected format
+                    vector_data = {
+                        "id": vector_id,
+                        "values": embedding,
+                        "metadata": sanitized_metadata
+                    }
                     
-                    # Try direct upsert
-                    direct_index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
-                    logger.info(f"✅ Successfully upserted vector through direct approach for {domain}")
+                    # Upsert the vector
+                    self.index.upsert(vectors=[vector_data], namespace="domains")
+                    logger.info(f"✅ Successfully upserted vector for {domain}")
                     return True
-                except Exception as e:
-                    logger.warning(f"❌ Error with direct upsert: {e}")
-                    # Continue with main functionality
-                
-                # Approach 3: Try with full URL path
-                try:
-                    logger.info(f"Attempting upsert with full URL for {domain}")
-                    
-                    # Re-initialize with explicit host
-                    pinecone.init(api_key=self.api_key, environment=self.environment)
-                    
-                    # Connect with full host URL including protocol
-                    full_host = f"https://{self.host_url}"
-                    
-                    # Try this approach but handle errors gracefully
-                    try:
-                        url_index = pinecone.Index(name=self.index_name, host=full_host)
-                    except TypeError:
-                        url_index = pinecone.Index(index_name=self.index_name, host=full_host)
-                    
-                    # Try direct upsert
-                    url_index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
-                    logger.info(f"✅ Successfully upserted vector with full URL for {domain}")
-                    return True
-                except Exception as e:
-                    logger.warning(f"❌ Error with URL-based upsert: {e}")
-                    # Continue with main functionality
-            
             except Exception as e:
-                logger.warning(f"❌ All vector storage approaches failed: {e}")
-                # Continue with main functionality
-            
-            # Always return success for main functionality
+                logger.warning(f"❌ Error using new Pinecone API: {e}")
+                # Try alternative approaches but don't fail main functionality
+                pass
+                
+            # If we get here, all approaches failed but we don't want to disrupt main functionality
+            logger.warning(f"❌ All vector storage approaches failed for {domain}, but continuing with main functionality")
             return True
                 
         except Exception as e:
@@ -312,56 +271,34 @@ class VectorDBConnector:
                 logger.warning("❌ Failed to create embedding for query")
                 return []
 
-            # Try all possible approaches to query vectors
+            # Try with new Pinecone API
             try:
-                # Approach 1: Use the existing index connection
                 if self.index:
-                    try:
-                        logger.info("Attempting to query using existing connection")
-                        results = self.index.query(
-                            vector=embedding,
-                            top_k=top_k,
-                            include_metadata=True,
-                            filter=filter
-                        )
-                        
-                        # Process results
-                        similar_domains = self._process_query_results(results)
-                        if similar_domains:
-                            logger.info(f"✅ Found {len(similar_domains)} similar domains")
-                            return similar_domains
-                    except Exception as e:
-                        logger.warning(f"❌ Error using existing connection for query: {e}")
-                        # Continue to next approach
-                
-                # Approach 2: Create a fresh connection
-                try:
-                    logger.info("Attempting direct query")
-                    # Initialize Pinecone directly
-                    pinecone.init(api_key=self.api_key, environment=self.environment)
-                    
-                    # Create a fresh index connection
-                    direct_index = pinecone.Index(self.index_name)
-                    
-                    # Try direct query
-                    results = direct_index.query(
+                    logger.info("Attempting to query using new Pinecone API")
+                    response = self.index.query(
+                        namespace="domains",
                         vector=embedding,
                         top_k=top_k,
                         include_metadata=True,
                         filter=filter
                     )
                     
-                    # Process results
-                    similar_domains = self._process_query_results(results)
-                    if similar_domains:
-                        logger.info(f"✅ Found {len(similar_domains)} similar domains through direct approach")
-                        return similar_domains
-                except Exception as e:
-                    logger.warning(f"❌ Error with direct query: {e}")
-                    # Return empty list
-            
+                    similar_domains = []
+                    for match in response.get('matches', []):
+                        metadata = match.get('metadata', {})
+                        domain = metadata.get("domain", "unknown")
+                        
+                        result = {
+                            "domain": domain,
+                            "score": match.get('score', 0),
+                            "metadata": metadata
+                        }
+                        similar_domains.append(result)
+                        
+                    logger.info(f"✅ Found {len(similar_domains)} similar domains")
+                    return similar_domains
             except Exception as e:
-                logger.warning(f"❌ All query approaches failed: {e}")
+                logger.warning(f"❌ Error using new Pinecone API for query: {e}")
                 # Return empty list
             
             # Return empty list if all approaches fail
@@ -371,29 +308,6 @@ class VectorDBConnector:
             logger.error(f"❌ Error in query preparation: {e}")
             logger.error(traceback.format_exc())
             # Return empty list for graceful error handling
-            return []
-            
-    def _process_query_results(self, results) -> List[Dict[str, Any]]:
-        """Process query results into a standardized format."""
-        similar_domains = []
-        
-        try:
-            for match in results.get('matches', []):
-                # Extract metadata
-                metadata = match.get('metadata', {})
-                domain = metadata.get("domain", "unknown")
-                
-                # Create result object
-                result = {
-                    "domain": domain,
-                    "score": match.get('score', 0),
-                    "metadata": metadata
-                }
-                similar_domains.append(result)
-                
-            return similar_domains
-        except Exception as e:
-            logger.error(f"❌ Error processing query results: {e}")
             return []
 
     def delete_domain_vector(self, domain: str) -> bool:
@@ -416,38 +330,15 @@ class VectorDBConnector:
             vector_id = self.generate_vector_id(domain)
             logger.info(f"Generated vector ID for deletion: {vector_id}")
             
-            # Try all possible approaches to delete the vector
+            # Try with new Pinecone API
             try:
-                # Approach 1: Use the existing index connection
                 if self.index:
-                    try:
-                        logger.info(f"Attempting to delete vector for {domain} using existing connection")
-                        self.index.delete(ids=[vector_id])
-                        logger.info(f"✅ Successfully deleted vector for {domain}")
-                        return True
-                    except Exception as e:
-                        logger.warning(f"❌ Error using existing connection for deletion: {e}")
-                        # Continue to next approach
-                
-                # Approach 2: Create a fresh connection
-                try:
-                    logger.info(f"Attempting direct deletion for {domain}")
-                    # Initialize Pinecone directly
-                    pinecone.init(api_key=self.api_key, environment=self.environment)
-                    
-                    # Create a fresh index connection
-                    direct_index = pinecone.Index(self.index_name)
-                    
-                    # Try direct deletion
-                    direct_index.delete(ids=[vector_id])
-                    logger.info(f"✅ Successfully deleted vector through direct approach for {domain}")
+                    logger.info(f"Attempting to delete vector for {domain} using new Pinecone API")
+                    self.index.delete(ids=[vector_id], namespace="domains")
+                    logger.info(f"✅ Successfully deleted vector for {domain}")
                     return True
-                except Exception as e:
-                    logger.warning(f"❌ Error with direct deletion: {e}")
-                    # Continue with main functionality
-            
             except Exception as e:
-                logger.warning(f"❌ All vector deletion approaches failed: {e}")
+                logger.warning(f"❌ Error using new Pinecone API for deletion: {e}")
                 # Continue with main functionality
             
             # Always return success for main functionality
