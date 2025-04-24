@@ -46,7 +46,7 @@ class VectorDBConnector:
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
-        self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "us-east-1")
+        self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "aped-4627-b74a")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.host_url = os.environ.get("PINECONE_HOST_URL", "domain-embeddings-pia5rh5.svc.aped-4627-b74a.pinecone.io")
         self.connected = False
@@ -57,6 +57,7 @@ class VectorDBConnector:
         logger.info(f"PINECONE_API_KEY available: {bool(self.api_key)}")
         logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
         logger.info(f"Using Pinecone host: {self.host_url}")
+        logger.info(f"Using Pinecone environment: {self.environment}")
 
         if not PINECONE_AVAILABLE:
             logger.warning("❌ Pinecone not available, vector storage disabled")
@@ -79,6 +80,7 @@ class VectorDBConnector:
         """Initialize the connection to Pinecone using SDK 2.2.x."""
         try:
             # Basic initialization with only required parameters
+            logger.info(f"Initializing Pinecone with api_key={self.api_key[:5]}... and environment={self.environment}")
             pinecone.init(api_key=self.api_key, environment=self.environment)
             
             try:
@@ -95,12 +97,30 @@ class VectorDBConnector:
                     
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index with host: {self.index_name}")
+                
+                # Test connection with a basic operation
+                try:
+                    stats = self.index.describe_index_stats()
+                    logger.info(f"Index stats: vector count={stats.get('total_vector_count', 'unknown')}")
+                except Exception as stats_error:
+                    logger.warning(f"Could not get index stats: {stats_error}")
             except Exception as e:
                 # Fall back to connection without host parameter
-                logger.info(f"Host parameter not supported, trying without it")
-                self.index = pinecone.Index(self.index_name)
-                self.connected = True
-                logger.info(f"✅ Successfully connected to Pinecone index without host: {self.index_name}")
+                logger.info(f"Host parameter not supported, trying without it: {e}")
+                try:
+                    self.index = pinecone.Index(self.index_name)
+                    self.connected = True
+                    logger.info(f"✅ Successfully connected to Pinecone index without host: {self.index_name}")
+                    
+                    # Test connection with a basic operation
+                    try:
+                        stats = self.index.describe_index_stats()
+                        logger.info(f"Index stats: vector count={stats.get('total_vector_count', 'unknown')}")
+                    except Exception as stats_error:
+                        logger.warning(f"Could not get index stats: {stats_error}")
+                except Exception as e2:
+                    logger.error(f"❌ Error connecting to index without host: {e2}")
+                    self.connected = False
                 
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
@@ -165,10 +185,7 @@ class VectorDBConnector:
         unique_str = f"{domain}_{content_type}"
         return hashlib.md5(unique_str.encode()).hexdigest()
 
-    def upsert_domain_vector(self,
-                            domain: str,
-                            content: str,
-                            metadata: Dict[str, Any]) -> bool:
+    def upsert_domain_vector(self, domain: str, content: str, metadata: Dict[str, Any]) -> bool:
         """
         Upsert a domain vector into Pinecone.
 
@@ -209,19 +226,45 @@ class VectorDBConnector:
                 else:
                     sanitized_metadata[key] = str(value)
 
-            # Include key information in log
+            # Log the full sanitized metadata for debugging
+            logger.info(f"Prepared metadata for upsert: {json.dumps(sanitized_metadata)[:200]}...")
             logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class', 'unknown')}")
 
-            # Upsert vector with explicit error handling
+            # Debug information about the Pinecone client
+            logger.info(f"Pinecone index details - connected: {self.connected}, index name: {self.index_name}")
+            logger.info(f"Using environment: {self.environment}")
+            logger.info(f"Host URL: {self.host_url}")
+
+            # Direct API approach - if the standard approach fails, try a more direct method
             try:
+                # First, try the standard approach with our initialized index
                 self.index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
                 logger.info(f"✅ Successfully upserted vector for domain {domain} to Pinecone!")
                 return True
             except Exception as e:
-                logger.error(f"❌ Error in Pinecone upsert operation: {e}")
-                if "Unknown host" in str(e) or "Name or service not known" in str(e):
-                    logger.error("This appears to be a DNS resolution issue with the Pinecone service")
-                return False
+                # Log the specific error
+                logger.error(f"❌ Standard upsert failed: {e}")
+                
+                # If we get a 401 or a malformed domain error, try reinitializing with direct index creation
+                if "401" in str(e) or "Unauthorized" in str(e) or "Malformed domain" in str(e):
+                    logger.info("Trying alternative direct approach for Pinecone upsert...")
+                    
+                    try:
+                        # Reinitialize Pinecone with minimal configuration
+                        pinecone.init(api_key=self.api_key, environment=self.environment)
+                        
+                        # Create a fresh index connection without host parameter
+                        direct_index = pinecone.Index(self.index_name)
+                        
+                        # Try direct upsert
+                        direct_index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
+                        logger.info(f"✅ Successfully upserted vector using direct approach for domain {domain}!")
+                        return True
+                    except Exception as direct_error:
+                        logger.error(f"❌ Direct upsert approach also failed: {direct_error}")
+                        return False
+                else:
+                    return False
                 
         except Exception as e:
             logger.error(f"❌ Error upserting vector for {domain}: {e}")
@@ -264,9 +307,30 @@ class VectorDBConnector:
                 )
             except Exception as e:
                 logger.error(f"❌ Error in Pinecone query operation: {e}")
-                if "Unknown host" in str(e) or "Name or service not known" in str(e):
-                    logger.error("This appears to be a DNS resolution issue with the Pinecone service")
-                return []
+                
+                # If we get authentication errors, try the direct approach
+                if "401" in str(e) or "Unauthorized" in str(e) or "Malformed domain" in str(e):
+                    logger.info("Trying alternative direct approach for Pinecone query...")
+                    
+                    try:
+                        # Reinitialize Pinecone with minimal configuration
+                        pinecone.init(api_key=self.api_key, environment=self.environment)
+                        
+                        # Create a fresh index connection without host parameter
+                        direct_index = pinecone.Index(self.index_name)
+                        
+                        # Try direct query
+                        results = direct_index.query(
+                            vector=embedding,
+                            top_k=top_k,
+                            include_metadata=True,
+                            filter=filter
+                        )
+                    except Exception as direct_error:
+                        logger.error(f"❌ Direct query approach also failed: {direct_error}")
+                        return []
+                else:
+                    return []
 
             # Process results
             similar_domains = []
@@ -315,8 +379,25 @@ class VectorDBConnector:
                 return True
             except Exception as e:
                 logger.error(f"❌ Error in Pinecone delete operation: {e}")
-                if "Unknown host" in str(e) or "Name or service not known" in str(e):
-                    logger.error("This appears to be a DNS resolution issue with the Pinecone service")
+                
+                # If we get authentication errors, try the direct approach
+                if "401" in str(e) or "Unauthorized" in str(e) or "Malformed domain" in str(e):
+                    logger.info("Trying alternative direct approach for Pinecone delete...")
+                    
+                    try:
+                        # Reinitialize Pinecone with minimal configuration
+                        pinecone.init(api_key=self.api_key, environment=self.environment)
+                        
+                        # Create a fresh index connection without host parameter
+                        direct_index = pinecone.Index(self.index_name)
+                        
+                        # Try direct delete
+                        direct_index.delete(ids=[vector_id])
+                        logger.info(f"✅ Deleted vector using direct approach for domain {domain}!")
+                        return True
+                    except Exception as direct_error:
+                        logger.error(f"❌ Direct delete approach also failed: {direct_error}")
+                        return False
                 return False
                 
         except Exception as e:
