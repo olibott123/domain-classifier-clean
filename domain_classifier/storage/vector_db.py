@@ -73,17 +73,25 @@ class VectorDBConnector:
         # Set up Anthropic client if API key is available
         if self.anthropic_api_key:
             try:
-                # Minimal initialization approach
+                # Minimal initialization with no extra parameters
                 logger.info("Initializing Anthropic client...")
+                # Simple approach without any extra parameters
+                self.anthropic_client = None  # Initially set to None
+                
+                # Just try the most basic initialization possible
                 try:
-                    # Create the client without any extra parameters
-                    self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
+                    self.anthropic_client = anthropic.Client(api_key=self.anthropic_api_key)
                     logger.info("✅ Anthropic client initialized successfully")
-                except Exception as e:
-                    logger.error(f"❌ Failed to initialize Anthropic client: {e}")
-                    self.anthropic_client = None
+                except Exception as e1:
+                    logger.warning(f"First attempt to initialize Anthropic client failed: {e1}")
+                    try:
+                        self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
+                        logger.info("✅ Alternative Anthropic client initialized successfully")
+                    except Exception as e2:
+                        logger.error(f"❌ Could not initialize Anthropic client: {e2}")
+                        self.anthropic_client = None
             except Exception as e:
-                logger.error(f"❌ Failed to initialize Anthropic client: {e}")
+                logger.error(f"❌ Error initializing Anthropic client: {e}")
                 logger.error(traceback.format_exc())
                 self.anthropic_client = None
         else:
@@ -102,24 +110,27 @@ class VectorDBConnector:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
 
     def _init_connection(self):
-        """Initialize the connection to Pinecone using SDK 2.2.x with a specific host URL."""
+        """Initialize the connection to Pinecone using SDK 2.2.x."""
         try:
             # Initialize Pinecone with API key and environment
             logger.info(f"Initializing Pinecone with environment: {self.environment}")
+            
+            # For version 2.2.4, we need to set the environment with index_name
+            # The host URL needs to follow a specific pattern: {index_name}-{project_id}.svc.{environment}.pinecone.io
+            # Since we already have the full host URL, we'll extract the environment from it
+            
+            # Initialize pinecone without trying to set the specific host
             pinecone.init(
                 api_key=self.api_key,
                 environment=self.environment
             )
             
-            # Directly connect to the index
+            # Directly connect to the index without specifying host
             try:
                 logger.info(f"Attempting to connect to index: {self.index_name}")
                 
-                # Create index with specific host
-                self.index = pinecone.Index(
-                    index_name=self.index_name,
-                    host=f"https://{self.host_url}"  # Specify the exact host URL
-                )
+                # Create index without host parameter in v2.2.4
+                self.index = pinecone.Index(self.index_name)
                 
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index: {self.index_name}")
@@ -133,13 +144,13 @@ class VectorDBConnector:
                     logger.info(f"Index stats: {stats}")
                 except Exception as e:
                     logger.warning(f"Could not get index stats: {e}")
-                    # Continue anyway, connection seems to work
+                    # Continue anyway, connection might still work
             except Exception as e:
                 logger.error(f"❌ Error connecting to index: {e}")
                 logger.error(traceback.format_exc())
                 self.connected = False
                 return
-                
+                    
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
             logger.error(traceback.format_exc())
