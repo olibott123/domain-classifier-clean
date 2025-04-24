@@ -207,6 +207,37 @@ class VectorDBConnector:
                     sanitized_metadata[key] = ""
                 else:
                     sanitized_metadata[key] = str(value)
+        
+            # Extract company name from metadata or Apollo data
+            company_name = None
+            # Try to get from Apollo data first
+            if 'apollo_data' in metadata and isinstance(metadata['apollo_data'], dict):
+                company_name = metadata['apollo_data'].get('name')
+            
+            # If not found, try to extract from company_description
+            if not company_name and 'company_description' in sanitized_metadata:
+                description = sanitized_metadata.get('company_description', '')
+                # Try to extract first sentence or portion that might contain name
+                if description.startswith(domain):
+                    # If description starts with domain name, try to get the company name
+                    parts = description.split(' is ', 1)
+                    if len(parts) > 1:
+                        company_name = parts[0]
+                else:
+                    # Look for company name patterns
+                    import re
+                    name_match = re.search(r'^([^\.]+) is', description)
+                    if name_match:
+                        company_name = name_match.group(1).strip()
+            
+            # Fallback to domain name
+            if not company_name:
+                # Use domain as company name, capitalized for better display
+                company_name = domain.split('.')[0].capitalize()
+            
+            # Add company_name to metadata
+            sanitized_metadata['company_name'] = company_name
+            logger.info(f"Adding company_name to vector metadata: {company_name}")
 
             # Try to use the new Pinecone API
             try:
@@ -321,10 +352,12 @@ class VectorDBConnector:
                             domain = metadata.get("domain", "unknown")
                             company_type = metadata.get("predicted_class", "Unknown")
                             description = metadata.get("company_description", "")
+                            company_name = metadata.get("company_name", domain)
                             
                             # Create enhanced result with more useful information
                             result = {
                                 "domain": domain,
+                                "company_name": company_name,
                                 "score": match.get('score', 0),
                                 "company_type": company_type,
                                 "description": description[:200] + "..." if len(description) > 200 else description,
@@ -337,7 +370,7 @@ class VectorDBConnector:
                         if format_results and similar_domains:
                             logger.info(f"Found {len(similar_domains)} similar domains:")
                             for i, result in enumerate(similar_domains):
-                                logger.info(f"{i+1}. {result['domain']} - {result['company_type']} (Score: {result['score']:.4f})")
+                                logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} (Score: {result['score']:.4f})")
                                 
                         return similar_domains
                     except Exception as e:
@@ -370,10 +403,12 @@ class VectorDBConnector:
                         domain = metadata.get("domain", "unknown")
                         company_type = metadata.get("predicted_class", "Unknown")
                         description = metadata.get("company_description", "")
+                        company_name = metadata.get("company_name", domain)
                         
                         # Create enhanced result with more useful information
                         result = {
                             "domain": domain,
+                            "company_name": company_name,
                             "score": match.get('score', 0),
                             "company_type": company_type,
                             "description": description[:200] + "..." if len(description) > 200 else description,
@@ -386,7 +421,7 @@ class VectorDBConnector:
                     if format_results and similar_domains:
                         logger.info(f"Found {len(similar_domains)} similar domains with direct approach:")
                         for i, result in enumerate(similar_domains):
-                            logger.info(f"{i+1}. {result['domain']} - {result['company_type']} (Score: {result['score']:.4f})")
+                            logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} (Score: {result['score']:.4f})")
                     
                     return similar_domains
                 except Exception as e:
