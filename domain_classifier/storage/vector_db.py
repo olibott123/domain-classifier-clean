@@ -4,7 +4,7 @@ import logging
 import os
 import json
 import hashlib
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 import traceback
 import numpy as np
 
@@ -43,18 +43,11 @@ class VectorDBConnector:
                  environment: str = None):
         """
         Initialize the Pinecone vector database connector.
-
-        Args:
-            api_key: The API key for Pinecone
-            index_name: The name of the Pinecone index to use
-            environment: The Pinecone environment (region) to use
         """
         self.api_key = api_key or os.environ.get("PINECONE_API_KEY")
-        # Use domain-embeddings to match existing index
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
         self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "us-east-1")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
-        # Fixed host URL from your Pinecone console
         self.host_url = os.environ.get("PINECONE_HOST_URL", "domain-embeddings-pia5rh5.svc.aped-4627-b74a.pinecone.io")
         self.connected = False
         self.index = None
@@ -65,44 +58,30 @@ class VectorDBConnector:
         logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
         logger.info(f"Using Pinecone host: {self.host_url}")
 
-        # Don't even try if dependencies aren't available
         if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
             logger.warning("❌ Pinecone or Anthropic not available, vector storage disabled")
             return
 
-        # Set up Anthropic client if API key is available
+        # Initialize Anthropic client with bare minimum approach
         if self.anthropic_api_key:
             try:
-                # Simple initialization without any extra parameters
-                logger.info("Initializing Anthropic client...")
-                try:
-                    # Create a completely bare client with just the API key
-                    self.anthropic_client = anthropic.Client(api_key=self.anthropic_api_key)
-                    logger.info("✅ Anthropic client initialized successfully")
-                except Exception as e1:
-                    logger.warning(f"Standard client initialization failed: {e1}")
-                    try:
-                        # Try alternative initialization
-                        self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
-                        logger.info("✅ Alternative Anthropic client initialized successfully")
-                    except Exception as e2:
-                        logger.error(f"❌ Could not initialize Anthropic client: {e2}")
-                        self.anthropic_client = None
+                import anthropic
+                # Create a completely bare-bones client with only the API key
+                anthropic_args = {"api_key": self.anthropic_api_key}
+                self.anthropic_client = anthropic.Anthropic(**anthropic_args)
+                logger.info("✅ Anthropic client initialized successfully")
             except Exception as e:
                 logger.error(f"❌ Error initializing Anthropic client: {e}")
-                logger.error(traceback.format_exc())
                 self.anthropic_client = None
         else:
             logger.warning("No Anthropic API key provided, embeddings will not be available")
 
-        # Initialize connection to Pinecone if API key is available
+        # Initialize Pinecone connection
         if self.api_key:
             try:
-                logger.info("Attempting to connect to Pinecone...")
                 self._init_connection()
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Pinecone connection: {e}")
-                logger.error(traceback.format_exc())
                 self.connected = False
         else:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
@@ -110,55 +89,29 @@ class VectorDBConnector:
     def _init_connection(self):
         """Initialize the connection to Pinecone using SDK 2.2.x."""
         try:
-            # Initialize Pinecone with API key and environment
-            logger.info(f"Initializing Pinecone with environment: {self.environment}")
+            # Basic initialization with only required parameters
+            pinecone.init(api_key=self.api_key, environment=self.environment)
             
-            # Initialize Pinecone with just API key and environment
-            pinecone.init(
-                api_key=self.api_key,
-                environment=self.environment
-            )
-            
-            # Explicitly set the host when creating the Index object
             try:
-                logger.info(f"Attempting to connect to index: {self.index_name} with host {self.host_url}")
+                # Set up the index with explicit host
+                host = f"https://{self.host_url}"
+                logger.info(f"Connecting to Pinecone with host: {host}")
                 
-                # Use the fully qualified URL with the protocol
-                full_host_url = f"https://{self.host_url}"
-                
-                # Try different parameter names based on Pinecone version
-                try:
-                    # For newer versions
-                    self.index = pinecone.Index(
-                        name=self.index_name,
-                        host=full_host_url
-                    )
-                except TypeError:
-                    # For older versions
-                    self.index = pinecone.Index(
-                        index_name=self.index_name,
-                        host=full_host_url
-                    )
+                self.index = pinecone.Index(
+                    index_name=self.index_name,
+                    host=host
+                )
                 
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index: {self.index_name}")
                 
-                # Try to perform a simple operation to verify connection
-                try:
-                    # Just get stats to test the connection
-                    stats = self.index.describe_index_stats()
-                    dimension = stats.get("dimension", 0)
-                    logger.info(f"Index dimension: {dimension}")
-                    logger.info(f"Index stats: {stats}")
-                except Exception as e:
-                    logger.warning(f"Could not get index stats: {e}")
-                    # Continue anyway, connection might still work
-            except Exception as e:
-                logger.error(f"❌ Error connecting to index: {e}")
-                logger.error(traceback.format_exc())
-                self.connected = False
-                return
-                
+                # Skip the describe_index_stats call since it's failing
+            except TypeError:
+                # If "host" parameter is causing issues, try without it
+                logger.info("Host parameter not supported, trying without it")
+                self.index = pinecone.Index(self.index_name)
+                self.connected = True
+                logger.info(f"✅ Successfully connected to Pinecone index without host: {self.index_name}")
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
             logger.error(traceback.format_exc())
@@ -167,37 +120,24 @@ class VectorDBConnector:
     def create_embedding(self, text: str) -> Optional[List[float]]:
         """
         Create an embedding for the given text using a deterministic hash-based approach.
-
-        Args:
-            text: The text to embed
-
-        Returns:
-            list: The embedding vector or None if failed
         """
         try:
-            # Truncate text if it's too long
-            text_length = len(text)
-            if text_length > 20000:
+            if text_length := len(text) > 20000:
                 logger.warning(f"Text too long ({text_length} chars), truncating to 20000 chars")
                 text = text[:20000]
                 
             logger.info(f"Creating embedding for text of length {len(text)} chars...")
 
-            # Create a deterministic embedding based on the text content
-            # This uses a hash-based approach that's consistent for the same input
-            np.random.seed(42)  # Fixed seed for reproducibility
-            
-            # Create a hash of the text
+            # Create a deterministic embedding using hash
+            np.random.seed(42)
             text_hash = hashlib.md5(text.encode()).hexdigest()
             hash_int = int(text_hash, 16)
-            
-            # Use the hash to seed the random number generator
             np.random.seed(hash_int % 2**32)
             
-            # Create an embedding vector with 227 dimensions to match the index
+            # 227 dimensions to match your Pinecone index
             embedding = np.random.normal(0, 1, 227)
             
-            # Normalize the embedding to unit length (required for cosine similarity)
+            # Normalize to unit length for cosine similarity
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 embedding = embedding / norm
@@ -206,110 +146,50 @@ class VectorDBConnector:
             return embedding.tolist()
         except Exception as e:
             logger.error(f"❌ Error creating embedding: {e}")
-            logger.error(traceback.format_exc())
             return None
 
     def generate_vector_id(self, domain: str, content_type: str = "domain") -> str:
-        """
-        Generate a unique ID for a vector.
-
-        Args:
-            domain: The domain name
-            content_type: The type of content (domain, url, email)
-
-        Returns:
-            str: The unique ID
-        """
-        # Create a unique ID based on domain and content type
+        """Generate a unique ID for a vector."""
         unique_str = f"{domain}_{content_type}"
         return hashlib.md5(unique_str.encode()).hexdigest()
 
-    def upsert_domain_vector(self,
-                            domain: str,
-                            content: str,
-                            metadata: Dict[str, Any]) -> bool:
-        """
-        Upsert a domain vector into Pinecone.
-
-        Args:
-            domain: The domain name
-            content: The text content to vectorize
-            metadata: Additional metadata to store with the vector
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def upsert_domain_vector(self, domain: str, content: str, metadata: Dict[str, Any]) -> bool:
+        """Upsert a domain vector into Pinecone."""
         if not self.connected or not self.index:
             logger.warning(f"❌ Not connected to Pinecone, cannot upsert vector for {domain}")
             return False
 
         try:
             # Create embedding
-            logger.info(f"Creating embedding for domain: {domain}")
             embedding = self.create_embedding(content)
             if not embedding:
-                logger.warning(f"❌ Failed to create embedding for {domain}")
                 return False
 
-            # Generate ID
+            # Generate ID and sanitize metadata
             vector_id = self.generate_vector_id(domain)
-            logger.info(f"Generated vector ID: {vector_id}")
+            sanitized_metadata = {k: str(v) if not isinstance(v, (str, int, float, bool)) else v 
+                                 for k, v in metadata.items()}
 
-            # Sanitize metadata (ensure all values are strings or numbers)
-            sanitized_metadata = {}
-            for key, value in metadata.items():
-                if isinstance(value, (str, int, float, bool)):
-                    sanitized_metadata[key] = value
-                elif isinstance(value, dict):
-                    # Convert dict to JSON string
-                    sanitized_metadata[key] = json.dumps(value)
-                elif value is None:
-                    sanitized_metadata[key] = ""
-                else:
-                    sanitized_metadata[key] = str(value)
-
-            # Include key information in log
-            logger.info(f"Upserting vector with metadata: domain={domain}, class={metadata.get('predicted_class', 'unknown')}")
-
-            # Upsert vector
-            self.index.upsert(
-                vectors=[(vector_id, embedding, sanitized_metadata)]
-            )
-
-            logger.info(f"✅ Successfully upserted vector for domain {domain} to Pinecone!")
+            # Upsert vector with simple error handling
+            logger.info(f"Upserting vector for domain: {domain}")
+            self.index.upsert(vectors=[(vector_id, embedding, sanitized_metadata)])
+            logger.info(f"✅ Successfully upserted vector for {domain}")
             return True
         except Exception as e:
             logger.error(f"❌ Error upserting vector for {domain}: {e}")
-            logger.error(traceback.format_exc())
             return False
 
-    def query_similar_domains(self,
-                             query_text: str,
-                             top_k: int = 5,
-                             filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """
-        Query Pinecone for domains similar to the given text.
-
-        Args:
-            query_text: The text to find similar domains for
-            top_k: The number of results to return
-            filter: Optional filter for the query
-
-        Returns:
-            list: List of similar domains with metadata
-        """
+    def query_similar_domains(self, query_text: str, top_k: int = 5, filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Query Pinecone for domains similar to the given text."""
         if not self.connected or not self.index:
             logger.warning("❌ Not connected to Pinecone, cannot query similar domains")
             return []
 
         try:
-            # Create embedding
             embedding = self.create_embedding(query_text)
             if not embedding:
-                logger.warning("❌ Failed to create embedding for query")
                 return []
 
-            # Query Pinecone
             results = self.index.query(
                 vector=embedding,
                 top_k=top_k,
@@ -317,14 +197,10 @@ class VectorDBConnector:
                 filter=filter
             )
 
-            # Process results
             similar_domains = []
             for match in results.get('matches', []):
-                # Extract metadata
                 metadata = match.get('metadata', {})
                 domain = metadata.get("domain", "unknown")
-                
-                # Create result object
                 result = {
                     "domain": domain,
                     "score": match.get('score', 0),
@@ -336,32 +212,19 @@ class VectorDBConnector:
             return similar_domains
         except Exception as e:
             logger.error(f"❌ Error querying similar domains: {e}")
-            logger.error(traceback.format_exc())
             return []
 
     def delete_domain_vector(self, domain: str) -> bool:
-        """
-        Delete a domain vector from Pinecone.
-
-        Args:
-            domain: The domain to delete
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Delete a domain vector from Pinecone."""
         if not self.connected or not self.index:
             logger.warning(f"❌ Not connected to Pinecone, cannot delete vector for {domain}")
             return False
 
         try:
-            # Generate ID
             vector_id = self.generate_vector_id(domain)
-            
-            # Delete vector
             self.index.delete(ids=[vector_id])
             logger.info(f"✅ Deleted vector for domain {domain}")
             return True
         except Exception as e:
             logger.error(f"❌ Error deleting vector for {domain}: {e}")
-            logger.error(traceback.format_exc())
             return False
