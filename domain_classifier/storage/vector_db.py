@@ -54,6 +54,8 @@ class VectorDBConnector:
         self.index_name = index_name or os.environ.get("PINECONE_INDEX_NAME", "domain-embeddings")
         self.environment = environment or os.environ.get("PINECONE_ENVIRONMENT", "us-east-1")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # Fixed host URL from your Pinecone console
+        self.host_url = os.environ.get("PINECONE_HOST_URL", "domain-embeddings-pia5rh5.svc.aped-4627-b74a.pinecone.io")
         self.connected = False
         self.index = None
         self.anthropic_client = None
@@ -61,7 +63,7 @@ class VectorDBConnector:
         logger.info(f"Initializing VectorDBConnector with index: {self.index_name}")
         logger.info(f"PINECONE_API_KEY available: {bool(self.api_key)}")
         logger.info(f"ANTHROPIC_API_KEY available: {bool(self.anthropic_api_key)}")
-        logger.info(f"Using Pinecone environment: {self.environment}")
+        logger.info(f"Using Pinecone host: {self.host_url}")
 
         # Don't even try if dependencies aren't available
         if not PINECONE_AVAILABLE or not ANTHROPIC_AVAILABLE:
@@ -71,20 +73,15 @@ class VectorDBConnector:
         # Set up Anthropic client if API key is available
         if self.anthropic_api_key:
             try:
-                # Initialize Anthropic client without proxies parameter
+                # Minimal initialization approach
                 logger.info("Initializing Anthropic client...")
                 try:
+                    # Create the client without any extra parameters
                     self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
                     logger.info("✅ Anthropic client initialized successfully")
-                except TypeError as e:
-                    # If we get a TypeError, try a different initialization approach
-                    logger.info(f"Modern client initialization failed: {e}, trying alternative approach")
-                    if hasattr(anthropic, "Client"):
-                        self.anthropic_client = anthropic.Client(api_key=self.anthropic_api_key)
-                        logger.info("✅ Alternative Anthropic client initialized successfully")
-                    else:
-                        logger.error("No compatible Anthropic client found")
-                        self.anthropic_client = None
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize Anthropic client: {e}")
+                    self.anthropic_client = None
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Anthropic client: {e}")
                 logger.error(traceback.format_exc())
@@ -105,7 +102,7 @@ class VectorDBConnector:
             logger.warning("No Pinecone API key provided, vector storage will not be available")
 
     def _init_connection(self):
-        """Initialize the connection to Pinecone using SDK 2.2.x."""
+        """Initialize the connection to Pinecone using SDK 2.2.x with a specific host URL."""
         try:
             # Initialize Pinecone with API key and environment
             logger.info(f"Initializing Pinecone with environment: {self.environment}")
@@ -114,10 +111,16 @@ class VectorDBConnector:
                 environment=self.environment
             )
             
-            # Attempt to directly connect to the index without listing indexes
+            # Directly connect to the index
             try:
                 logger.info(f"Attempting to connect to index: {self.index_name}")
-                self.index = pinecone.Index(self.index_name)
+                
+                # Create index with specific host
+                self.index = pinecone.Index(
+                    index_name=self.index_name,
+                    host=f"https://{self.host_url}"  # Specify the exact host URL
+                )
+                
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index: {self.index_name}")
                 
