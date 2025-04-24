@@ -73,18 +73,16 @@ class VectorDBConnector:
         # Set up Anthropic client if API key is available
         if self.anthropic_api_key:
             try:
-                # Minimal initialization with no extra parameters
+                # Simple initialization without any extra parameters
                 logger.info("Initializing Anthropic client...")
-                # Simple approach without any extra parameters
-                self.anthropic_client = None  # Initially set to None
-                
-                # Just try the most basic initialization possible
                 try:
+                    # Create a completely bare client with just the API key
                     self.anthropic_client = anthropic.Client(api_key=self.anthropic_api_key)
                     logger.info("✅ Anthropic client initialized successfully")
                 except Exception as e1:
-                    logger.warning(f"First attempt to initialize Anthropic client failed: {e1}")
+                    logger.warning(f"Standard client initialization failed: {e1}")
                     try:
+                        # Try alternative initialization
                         self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
                         logger.info("✅ Alternative Anthropic client initialized successfully")
                     except Exception as e2:
@@ -115,27 +113,37 @@ class VectorDBConnector:
             # Initialize Pinecone with API key and environment
             logger.info(f"Initializing Pinecone with environment: {self.environment}")
             
-            # For version 2.2.4, we need to set the environment with index_name
-            # The host URL needs to follow a specific pattern: {index_name}-{project_id}.svc.{environment}.pinecone.io
-            # Since we already have the full host URL, we'll extract the environment from it
-            
-            # Initialize pinecone without trying to set the specific host
+            # Initialize Pinecone with just API key and environment
             pinecone.init(
                 api_key=self.api_key,
                 environment=self.environment
             )
             
-            # Directly connect to the index without specifying host
+            # Explicitly set the host when creating the Index object
             try:
-                logger.info(f"Attempting to connect to index: {self.index_name}")
+                logger.info(f"Attempting to connect to index: {self.index_name} with host {self.host_url}")
                 
-                # Create index without host parameter in v2.2.4
-                self.index = pinecone.Index(self.index_name)
+                # Use the fully qualified URL with the protocol
+                full_host_url = f"https://{self.host_url}"
+                
+                # Try different parameter names based on Pinecone version
+                try:
+                    # For newer versions
+                    self.index = pinecone.Index(
+                        name=self.index_name,
+                        host=full_host_url
+                    )
+                except TypeError:
+                    # For older versions
+                    self.index = pinecone.Index(
+                        index_name=self.index_name,
+                        host=full_host_url
+                    )
                 
                 self.connected = True
                 logger.info(f"✅ Successfully connected to Pinecone index: {self.index_name}")
                 
-                # Try to do a simple operation to verify connection
+                # Try to perform a simple operation to verify connection
                 try:
                     # Just get stats to test the connection
                     stats = self.index.describe_index_stats()
@@ -150,7 +158,7 @@ class VectorDBConnector:
                 logger.error(traceback.format_exc())
                 self.connected = False
                 return
-                    
+                
         except Exception as e:
             logger.error(f"❌ Error connecting to Pinecone: {e}")
             logger.error(traceback.format_exc())
