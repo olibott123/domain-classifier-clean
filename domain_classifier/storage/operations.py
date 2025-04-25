@@ -219,3 +219,184 @@ def query_similar_domains(query_text: str, top_k: int = 5, filter=None, vector_d
         logger.error(f"Error querying similar domains: {e}")
         logger.error(traceback.format_exc())
         return []
+
+def find_companies_by_location(location: str, 
+                           company_type: str = None, 
+                           top_k: int = 10,
+                           vector_db_conn = None) -> List[Dict[str, Any]]:
+    """
+    Find companies in a specific location, with optional company type filtering.
+    
+    Args:
+        location: Location to search for (city, state, country)
+        company_type: Optional filter for company type (e.g. "Managed Service Provider")
+        top_k: Number of results to return
+        vector_db_conn: Optional VectorDBConnector instance (will create one if not provided)
+        
+    Returns:
+        List of companies in the specified location with detailed information
+    """
+    # Create vector db connector if not provided
+    if vector_db_conn is None:
+        from domain_classifier.storage.vector_db import VectorDBConnector
+        logger.info("Creating new VectorDBConnector instance for location search...")
+        vector_db_conn = VectorDBConnector()
+        logger.info(f"Created VectorDBConnector, connected: {vector_db_conn.connected}")
+    
+    # Set up filter dictionary
+    filter_dict = {}
+    
+    # Add location filter - we look for partial matches in the company_location field
+    filter_dict["company_location"] = {"$containsAny": location.split()}
+    
+    # Add company type filter if provided
+    if company_type:
+        filter_dict["predicted_class"] = {"$eq": company_type}
+        logger.info(f"Searching for {company_type} companies in location: {location}")
+    else:
+        logger.info(f"Searching for all company types in location: {location}")
+    
+    # Create a query about the location to improve semantic search
+    location_query = f"Companies located in {location}"
+    
+    # Query for companies in the specified location
+    results = vector_db_conn.query_similar_domains(
+        query_text=location_query,
+        top_k=top_k,
+        filter=filter_dict,
+        format_results=True  # Enable formatted logging
+    )
+    
+    # Print results in a nice format
+    if results:
+        logger.info(f"Found {len(results)} companies in {location}:")
+        for i, result in enumerate(results):
+            logger.info(f"Result #{i+1}:")
+            logger.info(f"  Company: {result['company_name']}")
+            logger.info(f"  Domain: {result['domain']}")
+            logger.info(f"  Type: {result['company_type']}")
+            logger.info(f"  Location: {result['location']}")
+            logger.info(f"  Similarity Score: {result['score']:.4f}")
+            logger.info("")
+    else:
+        logger.info(f"No companies found in {location}")
+        
+    return results
+
+def get_unique_locations(vector_db_conn = None) -> List[str]:
+    """
+    Get a list of all unique locations in the database.
+    
+    Args:
+        vector_db_conn: Optional VectorDBConnector instance (will create one if not provided)
+        
+    Returns:
+        List of unique locations
+    """
+    # Create vector db connector if not provided
+    if vector_db_conn is None:
+        from domain_classifier.storage.vector_db import VectorDBConnector
+        logger.info("Creating new VectorDBConnector instance for location list...")
+        vector_db_conn = VectorDBConnector()
+        logger.info(f"Created VectorDBConnector, connected: {vector_db_conn.connected}")
+    
+    try:
+        # Check if index is available
+        if not vector_db_conn.index:
+            logger.warning("No Pinecone index available, cannot get locations")
+            return []
+            
+        # Fetch all vectors with company_location field
+        # Note: This might not scale well with very large datasets
+        stats = vector_db_conn.index.describe_index_stats()
+        total_vectors = stats.get('total_vector_count', 0)
+        
+        if total_vectors == 0:
+            logger.warning("No vectors in database, cannot get locations")
+            return []
+            
+        # For small-to-medium datasets, just fetch all vectors with locations
+        # This is a simplified approach - for large datasets, you'd need pagination
+        query_response = vector_db_conn.index.query(
+            vector=[0.1] * 227,  # Dummy vector
+            top_k=min(total_vectors, 10000),  # Cap at 10,000 to avoid overwhelming the system
+            include_metadata=True,
+            filter={"company_location": {"$exists": True}},
+            namespace="domains"
+        )
+        
+        # Extract unique locations
+        locations = set()
+        for match in query_response.get('matches', []):
+            metadata = match.get('metadata', {})
+            location = metadata.get('company_location')
+            if location:
+                locations.add(location)
+                
+        # Sort locations alphabetically
+        sorted_locations = sorted(list(locations))
+        logger.info(f"Found {len(sorted_locations)} unique locations")
+        
+        return sorted_locations
+            
+    except Exception as e:
+        logger.error(f"Error getting unique locations: {e}")
+        logger.error(traceback.format_exc())
+        return []
+
+def find_similar_companies(domain_or_query: str, 
+                          company_type: str = None, 
+                          top_k: int = 5,
+                          vector_db_conn = None) -> List[Dict[str, Any]]:
+    """
+    Find companies similar to the given domain or query text, with optional company type filtering.
+    
+    Args:
+        domain_or_query: Domain name or description to search for similar companies
+        company_type: Optional filter for company type (e.g. "Managed Service Provider")
+        top_k: Number of results to return
+        vector_db_conn: Optional VectorDBConnector instance (will create one if not provided)
+        
+    Returns:
+        List of similar companies with detailed information
+    """
+    # Create vector db connector if not provided
+    if vector_db_conn is None:
+        from domain_classifier.storage.vector_db import VectorDBConnector
+        logger.info("Creating new VectorDBConnector instance for similarity search...")
+        vector_db_conn = VectorDBConnector()
+        logger.info(f"Created VectorDBConnector, connected: {vector_db_conn.connected}")
+    
+    # Set up filter if company_type is provided
+    filter_dict = None
+    if company_type:
+        filter_dict = {"predicted_class": {"$eq": company_type}}
+        logger.info(f"Searching for companies similar to '{domain_or_query}' with type: {company_type}")
+    else:
+        logger.info(f"Searching for companies similar to '{domain_or_query}' (any type)")
+    
+    # Query for similar domains
+    results = vector_db_conn.query_similar_domains(
+        query_text=domain_or_query,
+        top_k=top_k,
+        filter=filter_dict,
+        format_results=True  # Enable formatted logging
+    )
+    
+    # Print results in a nice format
+    if results:
+        logger.info(f"Found {len(results)} similar companies:")
+        for i, result in enumerate(results):
+            logger.info(f"Result #{i+1}:")
+            logger.info(f"  Company: {result.get('company_name', result.get('domain'))}")
+            logger.info(f"  Domain: {result['domain']}")
+            logger.info(f"  Type: {result['company_type']}")
+            logger.info(f"  Location: {result.get('location', 'Unknown location')}")
+            logger.info(f"  Similarity Score: {result['score']:.4f}")
+            if 'description' in result:
+                logger.info(f"  Description: {result['description'][:150]}...")
+            logger.info("")
+    else:
+        logger.info("No similar companies found.")
+        
+    return results
