@@ -238,6 +238,49 @@ class VectorDBConnector:
             # Add company_name to metadata
             sanitized_metadata['company_name'] = company_name
             logger.info(f"Adding company_name to vector metadata: {company_name}")
+            
+            # Extract and add location data
+            company_location = None
+            if 'apollo_data' in metadata and isinstance(metadata['apollo_data'], dict):
+                apollo_data = metadata['apollo_data']
+                
+                # Check for location data in Apollo data
+                if 'location' in apollo_data and isinstance(apollo_data['location'], dict):
+                    location = apollo_data['location']
+                    
+                    # Use formatted address if available
+                    if location.get('formatted_address'):
+                        company_location = location.get('formatted_address')
+                    # Otherwise construct from components
+                    elif location.get('city'):
+                        location_parts = []
+                        if location.get('city'):
+                            location_parts.append(location.get('city'))
+                        if location.get('state'):
+                            location_parts.append(location.get('state'))
+                        if location.get('country'):
+                            location_parts.append(location.get('country'))
+                            
+                        if location_parts:
+                            company_location = ", ".join(location_parts)
+            
+            # Add location to metadata if found
+            if company_location:
+                sanitized_metadata['company_location'] = company_location
+                logger.info(f"Adding company_location to vector metadata: {company_location}")
+                
+                # Also add individual location components if available in Apollo data
+                if 'apollo_data' in metadata and isinstance(metadata['apollo_data'], dict):
+                    apollo_data = metadata['apollo_data']
+                    if 'location' in apollo_data and isinstance(apollo_data['location'], dict):
+                        location = apollo_data['location']
+                        
+                        if location.get('city'):
+                            sanitized_metadata['company_city'] = location.get('city')
+                        if location.get('state'):
+                            sanitized_metadata['company_state'] = location.get('state')
+                        if location.get('country'):
+                            sanitized_metadata['company_country'] = location.get('country')
 
             # Try to use the new Pinecone API
             try:
@@ -353,6 +396,7 @@ class VectorDBConnector:
                             company_type = metadata.get("predicted_class", "Unknown")
                             description = metadata.get("company_description", "")
                             company_name = metadata.get("company_name", domain)
+                            company_location = metadata.get("company_location", "Unknown location")
                             
                             # Create enhanced result with more useful information
                             result = {
@@ -361,6 +405,7 @@ class VectorDBConnector:
                                 "score": match.get('score', 0),
                                 "company_type": company_type,
                                 "description": description[:200] + "..." if len(description) > 200 else description,
+                                "location": company_location,
                                 "vector_id": match.get('id', ""),
                                 "metadata": metadata  # Keep all metadata for reference
                             }
@@ -370,7 +415,7 @@ class VectorDBConnector:
                         if format_results and similar_domains:
                             logger.info(f"Found {len(similar_domains)} similar domains:")
                             for i, result in enumerate(similar_domains):
-                                logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} (Score: {result['score']:.4f})")
+                                logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} - {result['location']} (Score: {result['score']:.4f})")
                                 
                         return similar_domains
                     except Exception as e:
@@ -404,6 +449,7 @@ class VectorDBConnector:
                         company_type = metadata.get("predicted_class", "Unknown")
                         description = metadata.get("company_description", "")
                         company_name = metadata.get("company_name", domain)
+                        company_location = metadata.get("company_location", "Unknown location")
                         
                         # Create enhanced result with more useful information
                         result = {
@@ -412,6 +458,7 @@ class VectorDBConnector:
                             "score": match.get('score', 0),
                             "company_type": company_type,
                             "description": description[:200] + "..." if len(description) > 200 else description,
+                            "location": company_location,
                             "vector_id": match.get('id', ""),
                             "metadata": metadata  # Keep all metadata for reference
                         }
@@ -421,7 +468,7 @@ class VectorDBConnector:
                     if format_results and similar_domains:
                         logger.info(f"Found {len(similar_domains)} similar domains with direct approach:")
                         for i, result in enumerate(similar_domains):
-                            logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} (Score: {result['score']:.4f})")
+                            logger.info(f"{i+1}. {result['company_name']} ({result['domain']}) - {result['company_type']} - {result['location']} (Score: {result['score']:.4f})")
                     
                     return similar_domains
                 except Exception as e:
