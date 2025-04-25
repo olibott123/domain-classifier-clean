@@ -86,7 +86,7 @@ class ApolloConnector:
     
     def _format_company_data(self, apollo_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Format Apollo data into a standardized structure.
+        Format Apollo data into a standardized structure with enhanced location data.
         
         Args:
             apollo_data: The raw Apollo organization data
@@ -98,6 +98,44 @@ class ApolloConnector:
             # Log a sample of the received data for debugging
             logger.debug(f"Sample of Apollo data: {json.dumps({k: apollo_data.get(k) for k in list(apollo_data.keys())[:5]})}")
             
+            # Extract and format location data
+            location_data = {
+                "street": apollo_data.get('street_address'),
+                "city": apollo_data.get('city'),
+                "state": apollo_data.get('state'),
+                "country": apollo_data.get('country'),
+                "postal_code": apollo_data.get('postal_code'),
+                "formatted_address": None  # Will fill below if components exist
+            }
+            
+            # Create a formatted address if we have enough components
+            address_parts = []
+            if location_data["street"]:
+                address_parts.append(location_data["street"])
+            if location_data["city"]:
+                address_parts.append(location_data["city"])
+            if location_data["state"]:
+                address_parts.append(location_data["state"])
+            if location_data["postal_code"]:
+                address_parts.append(location_data["postal_code"])
+            if location_data["country"]:
+                address_parts.append(location_data["country"])
+                
+            if address_parts:
+                location_data["formatted_address"] = ", ".join(address_parts)
+                
+            # Also add coordinates if available
+            if apollo_data.get('latitude') and apollo_data.get('longitude'):
+                location_data["coordinates"] = {
+                    "latitude": apollo_data.get('latitude'),
+                    "longitude": apollo_data.get('longitude')
+                }
+            
+            # Extract phone number safely
+            phone = apollo_data.get('phone', '')
+            if not phone and apollo_data.get('phone_numbers') and len(apollo_data.get('phone_numbers', [])) > 0:
+                phone = apollo_data.get('phone_numbers')[0]
+                
             # Extract and format the most relevant fields
             return {
                 "name": apollo_data.get('name'),
@@ -107,8 +145,8 @@ class ApolloConnector:
                 "revenue": apollo_data.get('estimated_annual_revenue'),
                 "founded_year": apollo_data.get('founded_year'),
                 "linkedin_url": apollo_data.get('linkedin_url'),
-                "phone": apollo_data.get('phone'),
-                "address": self._format_address(apollo_data),
+                "phone": phone,
+                "location": location_data,  # Enhanced location data
                 "technologies": apollo_data.get('technologies', []),
                 "funding": {
                     "total_funding": apollo_data.get('total_funding'),
@@ -135,6 +173,7 @@ class ApolloConnector:
         Returns:
             dict: Formatted address data
         """
+        # This is kept for backward compatibility
         return {
             "street": apollo_data.get('street_address'),
             "city": apollo_data.get('city'),
@@ -210,6 +249,27 @@ class ApolloConnector:
         Returns:
             dict: Formatted person data
         """
+        # Create location data if available
+        location = None
+        if person_data.get('city') or person_data.get('state') or person_data.get('country'):
+            location = {
+                "city": person_data.get('city'),
+                "state": person_data.get('state'),
+                "country": person_data.get('country'),
+            }
+            
+            # Create formatted location string
+            location_parts = []
+            if location["city"]:
+                location_parts.append(location["city"])
+            if location["state"]:
+                location_parts.append(location["state"])
+            if location["country"]:
+                location_parts.append(location["country"])
+                
+            if location_parts:
+                location["formatted_address"] = ", ".join(location_parts)
+        
         return {
             "name": f"{person_data.get('first_name', '')} {person_data.get('last_name', '')}".strip(),
             "first_name": person_data.get('first_name'),
@@ -220,5 +280,6 @@ class ApolloConnector:
             "linkedin_url": person_data.get('linkedin_url'),
             "phone": person_data.get('phone_number'),
             "department": person_data.get('department'),
-            "company": person_data.get('organization_name')
+            "company": person_data.get('organization_name'),
+            "location": location
         }
