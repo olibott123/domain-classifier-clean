@@ -520,5 +520,93 @@ def register_routes(app):
                 "error": str(e),
                 "results": []
             }), 500
+    
+    @app.route('/find-companies-by-location', methods=['POST', 'OPTIONS'])
+    def find_companies_by_location():
+        """API endpoint to find companies by location."""
+        # Handle preflight requests
+        if request.method == 'OPTIONS':
+            return '', 204
+        
+        try:
+            data = request.json
+            location = data.get("location", "").strip()
+            company_type = data.get("company_type", None)
+            top_k = data.get("top_k", 10)
+            
+            if not location:
+                return jsonify({"error": "Location parameter is required"}), 400
+            
+            # Create filter dictionary
+            filter_dict = {}
+            
+            # Add location filter - we look for partial matches
+            filter_dict["company_location"] = {"$containsAny": location.split()}
+            
+            # Add company type filter if provided
+            if company_type:
+                filter_dict["predicted_class"] = {"$eq": company_type}
+            
+            logger.info(f"Searching for companies in location: {location}")
+            
+            # Create vector DB connector
+            from domain_classifier.storage.vector_db import VectorDBConnector
+            vector_db = VectorDBConnector()
+            
+            # Create a query about the location to improve semantic search
+            location_query = f"Companies located in {location}"
+            
+            # Query for companies in the specified location
+            results = vector_db.query_similar_domains(
+                query_text=location_query,
+                top_k=top_k,
+                filter=filter_dict,
+                format_results=True
+            )
+            
+            # Process results for API response
+            companies = []
+            for result in results:
+                company = {
+                    "domain": result.get("domain"),
+                    "company_name": result.get("company_name"),
+                    "company_type": result.get("company_type"),
+                    "location": result.get("location"),
+                    "description": result.get("description", "")[:200],
+                    "score": result.get("score", 0)
+                }
+                companies.append(company)
+            
+            # Return formatted results
+            return jsonify({
+                "companies": companies,
+                "count": len(companies),
+                "location": location,
+                "company_type_filter": company_type
+            }), 200
+        except Exception as e:
+            logger.error(f"Error in find-companies-by-location endpoint: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+    @app.route('/get-unique-locations', methods=['GET'])
+    def get_unique_locations_api():
+        """API endpoint to get all unique locations in the database."""
+        try:
+            # Import function from operations
+            from domain_classifier.storage.operations import get_unique_locations
+            
+            # Get the locations
+            locations = get_unique_locations()
+            
+            # Return the results
+            return jsonify({
+                "locations": locations,
+                "count": len(locations)
+            }), 200
+        except Exception as e:
+            logger.error(f"Error getting unique locations: {e}")
+            logger.error(traceback.format_exc())
+            return jsonify({"error": str(e), "locations": []}), 500
             
     return app
