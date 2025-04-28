@@ -131,7 +131,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
-            # Look for classifications not older than 30 days and include Apollo data fields
+            # Look for classifications not older than 30 days and include crawler and classifier type fields
             query = """
                 SELECT
                     DOMAIN,
@@ -144,7 +144,8 @@ class SnowflakeConnector:
                     CLASSIFICATION_DATE,
                     LLM_EXPLANATION,
                     APOLLO_COMPANY_DATA,
-                    APOLLO_PERSON_DATA
+                    CRAWLER_TYPE,
+                    CLASSIFIER_TYPE
                 FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
                 AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
@@ -247,7 +248,7 @@ class SnowflakeConnector:
     def save_classification(self, domain, company_type, confidence_score, all_scores, 
                            model_metadata, low_confidence, detection_method, 
                            llm_explanation=None, apollo_company_data=None, 
-                           apollo_person_data=None):
+                           crawler_type=None, classifier_type=None):
         """Save domain classification to Snowflake with explanation and Apollo data."""
         if not self.connected:
             logger.info(f"Fallback: Not saving classification for {domain}")
@@ -273,8 +274,9 @@ class SnowflakeConnector:
             basic_query = """
                 INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
                 (domain, company_type, confidence_score, all_scores, model_metadata, 
-                low_confidence, detection_method, classification_date, llm_explanation)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+                low_confidence, detection_method, classification_date, llm_explanation,
+                crawler_type, classifier_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s)
             """
             
             basic_params = [
@@ -285,7 +287,9 @@ class SnowflakeConnector:
                 model_metadata, 
                 low_confidence, 
                 detection_method,
-                llm_explanation
+                llm_explanation,
+                crawler_type,
+                classifier_type
             ]
             
             # Execute the basic insert
@@ -310,25 +314,6 @@ class SnowflakeConnector:
                     )
                 """
                 cursor.execute(company_update, [apollo_company_json, domain, domain])
-            
-            if apollo_person_data:
-                # Convert to JSON string if it's not already
-                if isinstance(apollo_person_data, dict):
-                    apollo_person_json = json.dumps(apollo_person_data)
-                else:
-                    apollo_person_json = apollo_person_data
-                    
-                # Run an UPDATE statement for person data
-                person_update = """
-                    UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
-                    SET apollo_person_data = TO_VARIANT(%s)
-                    WHERE domain = %s AND classification_date = (
-                        SELECT MAX(classification_date) 
-                        FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
-                        WHERE domain = %s
-                    )
-                """
-                cursor.execute(person_update, [apollo_person_json, domain, domain])
             
             conn.commit()
             logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
