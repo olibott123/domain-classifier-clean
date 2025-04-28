@@ -273,29 +273,86 @@ class SnowflakeConnector:
             apollo_company_json = json.dumps(apollo_company_data) if apollo_company_data else None
             apollo_person_json = json.dumps(apollo_person_data) if apollo_person_data else None
             
-            # Use Snowflake's TO_VARIANT function to convert the JSON strings to VARIANT type
-            query = """
-                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                (domain, company_type, confidence_score, all_scores, model_metadata, 
-                low_confidence, detection_method, classification_date, llm_explanation,
-                apollo_company_data, apollo_person_data)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
-                TO_VARIANT(%s), TO_VARIANT(%s))
-            """
-            
-            params = (
-                domain, 
-                company_type, 
-                confidence_score, 
-                all_scores, 
-                model_metadata, 
-                low_confidence, 
-                detection_method,
-                llm_explanation,
-                apollo_company_json,
-                apollo_person_json
-            )
-            
+            # Modify the query to use PARSE_JSON directly in the SQL
+            if apollo_company_json is not None and apollo_person_json is not None:
+                query = """
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                    (domain, company_type, confidence_score, all_scores, model_metadata, 
+                    low_confidence, detection_method, classification_date, llm_explanation,
+                    apollo_company_data, apollo_person_data)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
+                    PARSE_JSON(%s), PARSE_JSON(%s))
+                """
+                params = (
+                    domain, 
+                    company_type, 
+                    confidence_score, 
+                    all_scores, 
+                    model_metadata, 
+                    low_confidence, 
+                    detection_method,
+                    llm_explanation,
+                    apollo_company_json,
+                    apollo_person_json
+                )
+            elif apollo_company_json is not None:
+                query = """
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                    (domain, company_type, confidence_score, all_scores, model_metadata, 
+                    low_confidence, detection_method, classification_date, llm_explanation,
+                    apollo_company_data)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
+                    PARSE_JSON(%s))
+                """
+                params = (
+                    domain, 
+                    company_type, 
+                    confidence_score, 
+                    all_scores, 
+                    model_metadata, 
+                    low_confidence, 
+                    detection_method,
+                    llm_explanation,
+                    apollo_company_json
+                )
+            elif apollo_person_json is not None:
+                query = """
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                    (domain, company_type, confidence_score, all_scores, model_metadata, 
+                    low_confidence, detection_method, classification_date, llm_explanation,
+                    apollo_person_data)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
+                    PARSE_JSON(%s))
+                """
+                params = (
+                    domain, 
+                    company_type, 
+                    confidence_score, 
+                    all_scores, 
+                    model_metadata, 
+                    low_confidence, 
+                    detection_method,
+                    llm_explanation,
+                    apollo_person_json
+                )
+            else:
+                query = """
+                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                    (domain, company_type, confidence_score, all_scores, model_metadata, 
+                    low_confidence, detection_method, classification_date, llm_explanation)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+                """
+                params = (
+                    domain, 
+                    company_type, 
+                    confidence_score, 
+                    all_scores, 
+                    model_metadata, 
+                    low_confidence, 
+                    detection_method,
+                    llm_explanation
+                )
+                
             cursor.execute(query, params)
             
             conn.commit()
