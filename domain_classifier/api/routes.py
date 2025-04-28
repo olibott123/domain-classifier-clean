@@ -139,7 +139,7 @@ def register_routes(app):
                     logger.info(f"Found existing classification for {domain}")
                     
                     # Process and return the cached result
-                    from domain_classifier.storage.cache_processor import process_cached_result
+                    from domain_classifier.storage.cache_manager import process_cached_result
                     result = process_cached_result(existing_record, domain, email, url)
                     
                     # Ensure result consistency
