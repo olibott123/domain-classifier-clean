@@ -269,27 +269,18 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
-            # Prepare Apollo data as direct PARSE_JSON SQL expressions
-            if apollo_company_data:
-                company_json = json.dumps(apollo_company_data).replace("'", "''")
-                apollo_company_sql = f"PARSE_JSON('{company_json}')"
-            else:
-                apollo_company_sql = "NULL"
-                
-            if apollo_person_data:
-                person_json = json.dumps(apollo_person_data).replace("'", "''")
-                apollo_person_sql = f"PARSE_JSON('{person_json}')"
-            else:
-                apollo_person_sql = "NULL"
+            # Convert Apollo data to JSON strings
+            apollo_company_json = json.dumps(apollo_company_data) if apollo_company_data else None
+            apollo_person_json = json.dumps(apollo_person_data) if apollo_person_data else None
             
-            # Insert new record - including Apollo data with direct PARSE_JSON in SQL
-            query = f"""
+            # Use Snowflake's TO_VARIANT function to convert the JSON strings to VARIANT type
+            query = """
                 INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
                 (domain, company_type, confidence_score, all_scores, model_metadata, 
                 low_confidence, detection_method, classification_date, llm_explanation,
                 apollo_company_data, apollo_person_data)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
-                {apollo_company_sql}, {apollo_person_sql})
+                TO_VARIANT(%s), TO_VARIANT(%s))
             """
             
             params = (
@@ -300,8 +291,9 @@ class SnowflakeConnector:
                 model_metadata, 
                 low_confidence, 
                 detection_method,
-                llm_explanation
-                # Apollo data is handled directly in the SQL query
+                llm_explanation,
+                apollo_company_json,
+                apollo_person_json
             )
             
             cursor.execute(query, params)
