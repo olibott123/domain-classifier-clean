@@ -7,8 +7,9 @@ import traceback
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[str, Any], snowflake_conn=None):
-    """Save classification data to Snowflake"""
+def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[str, Any], 
+                     snowflake_conn=None, apollo_company_data=None, apollo_person_data=None):
+    """Save classification data and Apollo enrichment data to Snowflake"""
     try:
         # If no connector is provided, import and create one
         if snowflake_conn is None:
@@ -74,7 +75,9 @@ def save_to_snowflake(domain: str, url: str, content: str, classification: Dict[
             model_metadata=model_metadata_json,
             low_confidence=bool(classification.get('low_confidence', False)),
             detection_method=str(classification.get('detection_method', 'llm_classification')),
-            llm_explanation=llm_explanation  # Add explanation directly to save_classification
+            llm_explanation=llm_explanation,  # Add explanation directly to save_classification
+            apollo_company_data=apollo_company_data,
+            apollo_person_data=apollo_person_data
         )
         
         # Also save to vector database
