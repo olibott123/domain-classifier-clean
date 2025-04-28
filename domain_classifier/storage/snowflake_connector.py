@@ -269,90 +269,49 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
-            # Convert Apollo data to JSON strings
-            apollo_company_json = json.dumps(apollo_company_data) if apollo_company_data else None
-            apollo_person_json = json.dumps(apollo_person_data) if apollo_person_data else None
+            # Try a different approach - let Snowflake handle the JSON conversion
+            # First, prepare the base query without Apollo data
+            query_fields = "domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classification_date, llm_explanation"
+            query_placeholders = "%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s"
             
-            # Modify the query to use PARSE_JSON directly in the SQL
-            if apollo_company_json is not None and apollo_person_json is not None:
-                query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                    (domain, company_type, confidence_score, all_scores, model_metadata, 
-                    low_confidence, detection_method, classification_date, llm_explanation,
-                    apollo_company_data, apollo_person_data)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
-                    PARSE_JSON(%s), PARSE_JSON(%s))
-                """
-                params = (
-                    domain, 
-                    company_type, 
-                    confidence_score, 
-                    all_scores, 
-                    model_metadata, 
-                    low_confidence, 
-                    detection_method,
-                    llm_explanation,
-                    apollo_company_json,
-                    apollo_person_json
-                )
-            elif apollo_company_json is not None:
-                query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                    (domain, company_type, confidence_score, all_scores, model_metadata, 
-                    low_confidence, detection_method, classification_date, llm_explanation,
-                    apollo_company_data)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
-                    PARSE_JSON(%s))
-                """
-                params = (
-                    domain, 
-                    company_type, 
-                    confidence_score, 
-                    all_scores, 
-                    model_metadata, 
-                    low_confidence, 
-                    detection_method,
-                    llm_explanation,
-                    apollo_company_json
-                )
-            elif apollo_person_json is not None:
-                query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                    (domain, company_type, confidence_score, all_scores, model_metadata, 
-                    low_confidence, detection_method, classification_date, llm_explanation,
-                    apollo_person_data)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
-                    PARSE_JSON(%s))
-                """
-                params = (
-                    domain, 
-                    company_type, 
-                    confidence_score, 
-                    all_scores, 
-                    model_metadata, 
-                    low_confidence, 
-                    detection_method,
-                    llm_explanation,
-                    apollo_person_json
-                )
-            else:
-                query = """
-                    INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                    (domain, company_type, confidence_score, all_scores, model_metadata, 
-                    low_confidence, detection_method, classification_date, llm_explanation)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
-                """
-                params = (
-                    domain, 
-                    company_type, 
-                    confidence_score, 
-                    all_scores, 
-                    model_metadata, 
-                    low_confidence, 
-                    detection_method,
-                    llm_explanation
-                )
+            params = [
+                domain, 
+                company_type, 
+                confidence_score, 
+                all_scores, 
+                model_metadata, 
+                low_confidence, 
+                detection_method,
+                llm_explanation
+            ]
+            
+            # Add Apollo data fields if provided
+            if apollo_company_data is not None:
+                query_fields += ", apollo_company_data"
+                query_placeholders += ", PARSE_JSON(%s)"
+                # Convert to JSON string if it's not already a string
+                if isinstance(apollo_company_data, dict):
+                    params.append(json.dumps(apollo_company_data))
+                else:
+                    params.append(apollo_company_data)
                 
+            if apollo_person_data is not None:
+                query_fields += ", apollo_person_data"
+                query_placeholders += ", PARSE_JSON(%s)"
+                # Convert to JSON string if it's not already a string
+                if isinstance(apollo_person_data, dict):
+                    params.append(json.dumps(apollo_person_data))
+                else:
+                    params.append(apollo_person_data)
+            
+            # Complete query
+            query = f"""
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                ({query_fields})
+                VALUES ({query_placeholders})
+            """
+            
+            # Execute with prepared parameters
             cursor.execute(query, params)
             
             conn.commit()
