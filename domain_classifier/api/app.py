@@ -1,3 +1,4 @@
+import os
 from flask import Flask
 from domain_classifier.api.middleware import setup_cors
 from domain_classifier.api.routes import register_all_routes
@@ -14,7 +15,10 @@ def create_app():
     setup_cors(app)
 
     # Initialize services
-    llm_classifier = LLMClassifier(api_key=os.environ.get("ANTHROPIC_API_KEY"), model="claude-3-haiku-20240307")
+    llm_classifier = LLMClassifier(
+        api_key=os.environ.get("ANTHROPIC_API_KEY"), 
+        model="claude-3-haiku-20240307"
+    )
     snowflake_conn = SnowflakeConnector()
     vector_db_conn = VectorDBConnector()
 
