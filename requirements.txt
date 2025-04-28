@@ -10,3 +10,5 @@ werkzeug==2.2.3
 # New dependencies for Pinecone integration
 pinecone==6.0.1
 numpy==1.24.3
+scrapy>=2.5.0
+crochet>=2.0.0
