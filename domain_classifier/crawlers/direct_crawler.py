@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Directly crawl a website using a simple GET request as a fallback method.
     
@@ -16,10 +16,11 @@ def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
         url (str): The URL to crawl
         
     Returns:
-        tuple: (content, (error_type, error_detail))
+        tuple: (content, (error_type, error_detail), crawler_type)
             - content: The crawled content or None if failed
             - error_type: Type of error if failed, None if successful
             - error_detail: Detailed error message if failed, None if successful
+            - crawler_type: Always "direct" if successful
     """
     try:
         logger.info(f"Attempting direct crawl for {url}")
@@ -55,53 +56,53 @@ def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             
             if clean_text and len(clean_text) > 100:
                 logger.info(f"Direct crawl successful, got {len(clean_text)} characters")
-                return clean_text, (None, None)
+                return clean_text, (None, None), "direct"
             else:
                 logger.warning(f"Direct crawl returned minimal content: {len(clean_text)} characters")
                 # Return even minimal content rather than nothing
                 if clean_text:
-                    return clean_text, (None, None)
+                    return clean_text, (None, None), "direct_minimal"
         else:
             logger.warning(f"Direct crawl returned non-text content: {content_type}")
-            return None, ("non_text_content", f"Website returned non-text content: {content_type}")
+            return None, ("non_text_content", f"Website returned non-text content: {content_type}"), None
         
-        return None, ("empty_content", "Website returned empty or insufficient content")
+        return None, ("empty_content", "Website returned empty or insufficient content"), None
     
     except requests.exceptions.SSLError as e:
         logger.error(f"SSL error during direct crawl: {e}")
         if "certificate verify failed" in str(e):
-            return None, ("ssl_invalid", "The website has an invalid SSL certificate")
+            return None, ("ssl_invalid", "The website has an invalid SSL certificate"), None
         elif "certificate has expired" in str(e):
-            return None, ("ssl_expired", "The website's SSL certificate has expired")
+            return None, ("ssl_expired", "The website's SSL certificate has expired"), None
         else:
-            return None, ("ssl_error", "The website has SSL certificate issues")
+            return None, ("ssl_error", "The website has SSL certificate issues"), None
     
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Connection error during direct crawl: {e}")
-        return None, ("connection_error", "Could not establish a connection to the website")
+        return None, ("connection_error", "Could not establish a connection to the website"), None
     
     except requests.exceptions.Timeout as e:
         logger.error(f"Timeout during direct crawl: {e}")
-        return None, ("timeout", "The website took too long to respond")
+        return None, ("timeout", "The website took too long to respond"), None
     
     except requests.exceptions.HTTPError as e:
         logger.error(f"HTTP error during direct crawl: {e}")
         status_code = e.response.status_code if hasattr(e, 'response') and hasattr(e.response, 'status_code') else None
         
         if status_code == 403 or status_code == 401:
-            return None, ("access_denied", "Access to the website was denied")
+            return None, ("access_denied", "Access to the website was denied"), None
         elif status_code == 404:
-            return None, ("not_found", "The requested page was not found")
+            return None, ("not_found", "The requested page was not found"), None
         elif status_code and 500 <= status_code < 600:
-            return None, ("server_error", "The website is experiencing server errors")
+            return None, ("server_error", "The website is experiencing server errors"), None
         else:
-            return None, ("http_error", f"HTTP error {status_code}")
+            return None, ("http_error", f"HTTP error {status_code}"), None
     
     except Exception as e:
         logger.error(f"Unexpected error during direct crawl: {e}")
-        return None, ("unknown_error", f"An unexpected error occurred: {str(e)}")
+        return None, ("unknown_error", f"An unexpected error occurred: {str(e)}"), None
 
-def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Try crawling a domain with different protocols (https, http) in case one fails.
     
@@ -116,7 +117,7 @@ def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[s
     https_url = f"https://{clean_domain}"
     
     logger.info(f"Trying HTTPS protocol for {clean_domain}")
-    content, (error_type, error_detail) = direct_crawl(https_url)
+    content, (error_type, error_detail), crawler_type = direct_crawl(https_url)
     
     # If https failed due to SSL or connection issues, try http
     if not content and error_type in ['ssl_invalid', 'ssl_expired', 'ssl_error', 'connection_error']:
@@ -124,47 +125,4 @@ def try_multiple_protocols(domain: str) -> Tuple[Optional[str], Tuple[Optional[s
         http_url = f"http://{clean_domain}"
         return direct_crawl(http_url)
     
-    return content, (error_type, error_detail)
-
-def extract_text_from_html(html_content: str) -> str:
-    """
-    Extract readable text from HTML content.
-    
-    Args:
-        html_content (str): HTML content
-        
-    Returns:
-        str: Extracted text
-    """
-    # Remove scripts and style blocks
-    text = re.sub(r'<script.*?>.*?</script>', ' ', html_content, flags=re.DOTALL)
-    text = re.sub(r'<style.*?>.*?</style>', ' ', text, flags=re.DOTALL)
-    
-    # Remove HTML comments
-    text = re.sub(r'<!--.*?-->', ' ', text, flags=re.DOTALL)
-    
-    # Replace common tags with spaces or newlines for better readability
-    text = re.sub(r'<br[^>]*>', '\n', text)
-    text = re.sub(r'<p[^>]*>', '\n\n', text)
-    text = re.sub(r'<div[^>]*>', '\n', text)
-    text = re.sub(r'<li[^>]*>', '\n- ', text)
-    text = re.sub(r'<h[1-6][^>]*>', '\n\n', text)
-    
-    # Remove all remaining HTML tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    
-    # Replace entities
-    text = re.sub(r'&nbsp;', ' ', text)
-    text = re.sub(r'&amp;', '&', text)
-    text = re.sub(r'&lt;', '<', text)
-    text = re.sub(r'&gt;', '>', text)
-    text = re.sub(r'&quot;', '"', text)
-    text = re.sub(r'&#39;', "'", text)
-    
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text)
-    
-    # Clean up the result
-    text = text.strip()
-    
-    return text
+    return content, (error_type, error_detail), crawler_type
