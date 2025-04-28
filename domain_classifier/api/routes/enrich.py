@@ -1,13 +1,11 @@
+"""Enrichment related routes for the domain classifier API."""
 import logging
 import traceback
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 
 # Import utilities
 from domain_classifier.utils.error_handling import detect_error_type, create_error_result
 from domain_classifier.storage.operations import save_to_snowflake
-
-# Import the classify route function
-from domain_classifier.api.routes.classify import classify_domain as classify_domain_route
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -33,25 +31,22 @@ def register_enrich_routes(app, snowflake_conn):
             is_email = '@' in input_value
             email = input_value if is_email else None
             
-            # First perform standard classification
-            # Store original request
-            original_request = request.json.copy()
+            # First perform standard classification by making an internal request
+            # We'll use the routes directly from the app, rather than importing functions
             
-            # Call classify_domain route function directly
-            classification_response = classify_domain_route()
+            # Get the classify_domain function from app's view functions
+            from domain_classifier.api.routes.classify import register_classify_routes
             
-            # Extract response data and status code
-            if isinstance(classification_response, tuple):
-                classification_result = classification_response[0].json
-                status_code = classification_response[1]
-            else:
-                classification_result = classification_response.json
-                status_code = 200
+            # Call the registered classify-domain route directly using the Flask test client
+            with app.test_client() as client:
+                response = client.post('/classify-domain', json=data)
+                classification_result = response.get_json()
+                status_code = response.status_code
             
             # Only proceed with enrichment for successful classifications
             if status_code >= 400:
                 logger.warning(f"Classification failed with status {status_code}, skipping enrichment")
-                return classification_response
+                return jsonify(classification_result), status_code
             
             # Extract domain, email and crawler type from classification result
             domain = classification_result.get('domain')
