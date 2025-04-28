@@ -14,7 +14,7 @@ from domain_classifier.config.overrides import check_domain_override
 from domain_classifier.crawlers.apify_crawler import crawl_website
 from domain_classifier.storage.operations import save_to_snowflake
 from domain_classifier.classifiers.result_validator import validate_result_consistency
-from domain_classifier.storage.cache_processor import process_cached_result
+from domain_classifier.storage.cache_manager import process_cached_result
 from domain_classifier.utils.text_processing import extract_company_description
 from domain_classifier.storage.result_processor import process_fresh_result
 
