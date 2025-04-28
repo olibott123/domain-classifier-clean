@@ -191,10 +191,11 @@ def register_routes(app):
             # If no content yet and we're not using existing content, crawl the website
             error_type = None
             error_detail = None
+            crawler_type = None
             
             if not content and not use_existing_content:
                 logger.info(f"Crawling website for {domain}")
-                content, (error_type, error_detail) = crawl_website(url)
+                content, (error_type, error_detail), crawler_type = crawl_website(url)
                 
                 if not content:
                     error_result = create_error_result(domain, error_type, error_detail, email)
@@ -251,8 +252,19 @@ def register_routes(app):
                     
                 return jsonify(error_result), 500
             
+            # Determine classifier type
+            classifier_type = "claude-llm" if classification else None
+            
             # Save to Snowflake and Vector DB (always save, even for reclassifications)
-            save_to_snowflake(domain, url, content, classification, snowflake_conn)
+            save_to_snowflake(
+                domain=domain, 
+                url=url, 
+                content=content, 
+                classification=classification, 
+                snowflake_conn=snowflake_conn,
+                crawler_type=crawler_type,
+                classifier_type=classifier_type
+            )
             
             # Process the fresh classification result
             from domain_classifier.storage.result_processor import process_fresh_result
@@ -376,9 +388,10 @@ def register_routes(app):
                 logger.warning(f"Classification failed with status {status_code}, skipping enrichment")
                 return classification_response
             
-            # Extract domain and email from classification result
+            # Extract domain, email and crawler type from classification result
             domain = classification_result.get('domain')
             email = classification_result.get('email')  # This will be set if the input was an email
+            crawler_type = classification_result.get('crawler_type')  # Get crawler type if available
             
             if not domain:
                 logger.error("No domain found in classification result")
@@ -435,10 +448,6 @@ def register_routes(app):
             # Add enrichment data to classification result
             classification_result['apollo_data'] = company_data or {}
             
-            # Remove the person data field completely
-            if 'apollo_person_data' in classification_result:
-                del classification_result['apollo_person_data']
-            
             # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
             
@@ -455,7 +464,8 @@ def register_routes(app):
                 classification=classification_result,
                 snowflake_conn=snowflake_conn,
                 apollo_company_data=company_data,
-                apollo_person_data=None  # No person data to save
+                crawler_type=crawler_type,
+                classifier_type="claude-llm-enriched"
             )
             
             # Return the enriched result
