@@ -270,6 +270,13 @@ def register_routes(app):
             from domain_classifier.storage.result_processor import process_fresh_result
             result = process_fresh_result(classification, domain, email, url)
 
+            # Add crawler_type to the result
+            if crawler_type:
+                result["crawler_type"] = crawler_type
+                
+            # Add classifier_type to the result
+            result["classifier_type"] = classifier_type
+
             # Ensure result consistency
             result = validate_result_consistency(result, domain)
             
@@ -391,7 +398,7 @@ def register_routes(app):
             # Extract domain, email and crawler type from classification result
             domain = classification_result.get('domain')
             email = classification_result.get('email')  # This will be set if the input was an email
-            crawler_type = classification_result.get('crawler_type')  # Get crawler type if available
+            crawler_type = classification_result.get('crawler_type')  # Get crawler type from classification result
             
             if not domain:
                 logger.error("No domain found in classification result")
@@ -451,6 +458,10 @@ def register_routes(app):
             # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
             
+            # Make sure the crawler_type is preserved from the original classification
+            if not classification_result.get('crawler_type') and crawler_type:
+                classification_result['crawler_type'] = crawler_type
+                
             # Save the enriched classification to Snowflake
             from domain_classifier.storage.operations import save_to_snowflake
             url = f"https://{domain}"
@@ -464,7 +475,7 @@ def register_routes(app):
                 classification=classification_result,
                 snowflake_conn=snowflake_conn,
                 apollo_company_data=company_data,
-                crawler_type=crawler_type,
+                crawler_type=crawler_type,  # Explicitly pass the crawler_type from the original classification
                 classifier_type="claude-llm-enriched"
             )
             
