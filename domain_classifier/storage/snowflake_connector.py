@@ -261,8 +261,8 @@ class SnowflakeConnector:
             cursor = conn.cursor()
             
             # Convert Apollo data to JSON strings if provided
-            apollo_company_json = json.dumps(apollo_company_data) if apollo_company_data else None
-            apollo_person_json = json.dumps(apollo_person_data) if apollo_person_data else None
+            apollo_company_json = f"PARSE_JSON('{json.dumps(apollo_company_data).replace("'", "''")}')" if apollo_company_data else "NULL"
+            apollo_person_json = f"PARSE_JSON('{json.dumps(apollo_person_data).replace("'", "''")}')" if apollo_person_data else "NULL"
             
             # Insert new record - including Apollo data fields
             query = """
