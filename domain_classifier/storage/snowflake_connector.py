@@ -269,12 +269,15 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
-            # Try a different approach - let Snowflake handle the JSON conversion
-            # First, prepare the base query without Apollo data
-            query_fields = "domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, classification_date, llm_explanation"
-            query_placeholders = "%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s"
+            # Basic fields that are always included
+            basic_query = """
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                (domain, company_type, confidence_score, all_scores, model_metadata, 
+                low_confidence, detection_method, classification_date, llm_explanation)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+            """
             
-            params = [
+            basic_params = [
                 domain, 
                 company_type, 
                 confidence_score, 
@@ -285,34 +288,47 @@ class SnowflakeConnector:
                 llm_explanation
             ]
             
-            # Add Apollo data fields if provided
-            if apollo_company_data is not None:
-                query_fields += ", apollo_company_data"
-                query_placeholders += ", PARSE_JSON(%s)"
-                # Convert to JSON string if it's not already a string
+            # Execute the basic insert
+            cursor.execute(basic_query, basic_params)
+            
+            # If we have Apollo data, update the record with separate statements
+            if apollo_company_data:
+                # Convert to JSON string if it's not already
                 if isinstance(apollo_company_data, dict):
-                    params.append(json.dumps(apollo_company_data))
+                    apollo_company_json = json.dumps(apollo_company_data)
                 else:
-                    params.append(apollo_company_data)
-                
-            if apollo_person_data is not None:
-                query_fields += ", apollo_person_data"
-                query_placeholders += ", PARSE_JSON(%s)"
-                # Convert to JSON string if it's not already a string
+                    apollo_company_json = apollo_company_data
+                    
+                # Run an UPDATE statement instead of trying to include in the INSERT
+                company_update = """
+                    UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                    SET apollo_company_data = TO_VARIANT(%s)
+                    WHERE domain = %s AND classification_date = (
+                        SELECT MAX(classification_date) 
+                        FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                        WHERE domain = %s
+                    )
+                """
+                cursor.execute(company_update, [apollo_company_json, domain, domain])
+            
+            if apollo_person_data:
+                # Convert to JSON string if it's not already
                 if isinstance(apollo_person_data, dict):
-                    params.append(json.dumps(apollo_person_data))
+                    apollo_person_json = json.dumps(apollo_person_data)
                 else:
-                    params.append(apollo_person_data)
-            
-            # Complete query
-            query = f"""
-                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                ({query_fields})
-                VALUES ({query_placeholders})
-            """
-            
-            # Execute with prepared parameters
-            cursor.execute(query, params)
+                    apollo_person_json = apollo_person_data
+                    
+                # Run an UPDATE statement for person data
+                person_update = """
+                    UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                    SET apollo_person_data = TO_VARIANT(%s)
+                    WHERE domain = %s AND classification_date = (
+                        SELECT MAX(classification_date) 
+                        FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                        WHERE domain = %s
+                    )
+                """
+                cursor.execute(person_update, [apollo_person_json, domain, domain])
             
             conn.commit()
             logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
