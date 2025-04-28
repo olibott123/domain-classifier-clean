@@ -445,6 +445,22 @@ def register_routes(app):
             # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
             
+            # Save the enriched classification to Snowflake
+            from domain_classifier.storage.operations import save_to_snowflake
+            url = f"https://{domain}"
+            content = snowflake_conn.get_domain_content(domain)
+            
+            # Save the enhanced data to Snowflake (with Apollo data)
+            save_to_snowflake(
+                domain=domain, 
+                url=url, 
+                content=content, 
+                classification=classification_result,
+                snowflake_conn=snowflake_conn,
+                apollo_company_data=company_data,
+                apollo_person_data=person_data
+            )
+            
             # Return the enriched result
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
             return jsonify(classification_result), 200
