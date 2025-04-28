@@ -9,9 +9,6 @@ from scrapy.signalmanager import dispatcher
 from typing import Tuple, Optional
 from urllib.parse import urlparse
 
-# Import error handling utilities
-from domain_classifier.utils.error_handling import detect_error_type
-
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -80,11 +77,6 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
     try:
         logger.info(f"Starting Scrapy crawl for {url}")
         
-        # Quick validation
-        parsed_url = urlparse(url)
-        if not parsed_url.netloc:
-            return None, ("invalid_url", "Invalid URL format")
-        
         # Create crawler instance and scrape
         crawler = ScrapyCrawler()
         content = crawler.scrape(url)
@@ -97,6 +89,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             return None, ("minimal_content", "Website returned minimal or no content")
             
     except Exception as e:
+        from domain_classifier.crawlers.apify_crawler import detect_error_type
         error_type, error_detail = detect_error_type(str(e))
         logger.error(f"Error in Scrapy crawler: {e} (Type: {error_type})")
         return None, (error_type, error_detail)
