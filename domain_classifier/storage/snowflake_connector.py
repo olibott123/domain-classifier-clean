@@ -246,7 +246,7 @@ class SnowflakeConnector:
     
     def save_classification(self, domain, company_type, confidence_score, all_scores, 
                            model_metadata, low_confidence, detection_method, 
-                           llm_explanation=None, apollo_company_data=None,
+                           llm_explanation=None, apollo_company_data=None, 
                            apollo_person_data=None):
         """Save domain classification to Snowflake with explanation and Apollo data."""
         if not self.connected:
@@ -260,19 +260,6 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Convert Apollo data to JSON strings if provided
-            apollo_company_json = f"PARSE_JSON('{json.dumps(apollo_company_data).replace("'", "''")}')" if apollo_company_data else "NULL"
-            apollo_person_json = f"PARSE_JSON('{json.dumps(apollo_person_data).replace("'", "''")}')" if apollo_person_data else "NULL"
-            
-            # Insert new record - including Apollo data fields
-            query = """
-                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
-                (domain, company_type, confidence_score, all_scores, model_metadata, 
-                low_confidence, detection_method, classification_date, llm_explanation,
-                apollo_company_data, apollo_person_data)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s)
-            """
-            
             # Ensure explanation isn't too long
             if llm_explanation and len(llm_explanation) > 5000:
                 # Truncate at a sentence boundary
@@ -282,6 +269,29 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
+            # Prepare Apollo data as direct PARSE_JSON SQL expressions
+            if apollo_company_data:
+                company_json = json.dumps(apollo_company_data).replace("'", "''")
+                apollo_company_sql = f"PARSE_JSON('{company_json}')"
+            else:
+                apollo_company_sql = "NULL"
+                
+            if apollo_person_data:
+                person_json = json.dumps(apollo_person_data).replace("'", "''")
+                apollo_person_sql = f"PARSE_JSON('{person_json}')"
+            else:
+                apollo_person_sql = "NULL"
+            
+            # Insert new record - including Apollo data with direct PARSE_JSON in SQL
+            query = f"""
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                (domain, company_type, confidence_score, all_scores, model_metadata, 
+                low_confidence, detection_method, classification_date, llm_explanation,
+                apollo_company_data, apollo_person_data)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, 
+                {apollo_company_sql}, {apollo_person_sql})
+            """
+            
             params = (
                 domain, 
                 company_type, 
@@ -290,9 +300,8 @@ class SnowflakeConnector:
                 model_metadata, 
                 low_confidence, 
                 detection_method,
-                llm_explanation,
-                apollo_company_json,
-                apollo_person_json
+                llm_explanation
+                # Apollo data is handled directly in the SQL query
             )
             
             cursor.execute(query, params)
