@@ -139,7 +139,7 @@ def register_routes(app):
                     logger.info(f"Found existing classification for {domain}")
                     
                     # Process and return the cached result
-                    from domain_classifier.storage.cache_manager import process_cached_result
+                    from domain_classifier.storage.cache_processor import process_cached_result
                     result = process_cached_result(existing_record, domain, email, url)
                     
                     # Ensure result consistency
@@ -394,11 +394,8 @@ def register_routes(app):
             # Enrich with Apollo company data
             company_data = apollo.enrich_company(domain)
             
-            # If we have an email, also get person data
+            # Don't look up person data to save Apollo credits
             person_data = None
-            if email:
-                logger.info(f"Looking up person data for email: {email}")
-                person_data = apollo.search_person(email)
             
             # Import recommendation engine
             from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
@@ -425,7 +422,7 @@ def register_routes(app):
                 detailed_description = generate_detailed_description(
                     classification_result,
                     company_data,
-                    person_data
+                    None  # No person data passed
                 )
                 
                 if detailed_description and len(detailed_description) > 50:
@@ -438,9 +435,9 @@ def register_routes(app):
             # Add enrichment data to classification result
             classification_result['apollo_data'] = company_data or {}
             
-            # Add person data if available
-            if person_data:
-                classification_result['apollo_person_data'] = person_data
+            # Remove the person data field completely
+            if 'apollo_person_data' in classification_result:
+                del classification_result['apollo_person_data']
             
             # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
@@ -458,7 +455,7 @@ def register_routes(app):
                 classification=classification_result,
                 snowflake_conn=snowflake_conn,
                 apollo_company_data=company_data,
-                apollo_person_data=person_data
+                apollo_person_data=None  # No person data to save
             )
             
             # Return the enriched result
