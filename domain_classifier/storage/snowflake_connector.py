@@ -131,7 +131,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
-            # Look for classifications not older than 30 days and include LLM_EXPLANATION field
+            # Look for classifications not older than 30 days and include Apollo data fields
             query = """
                 SELECT
                     DOMAIN,
@@ -142,8 +142,10 @@ class SnowflakeConnector:
                     DETECTION_METHOD,
                     MODEL_METADATA,
                     CLASSIFICATION_DATE,
-                    LLM_EXPLANATION
-                FROM DOMAIN_CLASSIFICATION
+                    LLM_EXPLANATION,
+                    APOLLO_COMPANY_DATA,
+                    APOLLO_PERSON_DATA
+                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
                 AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
                 ORDER BY CLASSIFICATION_DATE DESC
@@ -183,7 +185,7 @@ class SnowflakeConnector:
             cursor = conn.cursor()
             query = """
                 SELECT text_content
-                FROM DOMAIN_CONTENT
+                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CONTENT
                 WHERE domain = %s
                 ORDER BY crawl_date DESC
                 LIMIT 1
@@ -225,7 +227,7 @@ class SnowflakeConnector:
             
             # Insert new record
             cursor.execute("""
-                INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CONTENT (domain, url, text_content, crawl_date)
                 VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
             """, (domain, url, content))
             
@@ -242,8 +244,11 @@ class SnowflakeConnector:
             if conn:
                 conn.close()
     
-    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, llm_explanation=None):
-        """Save domain classification to Snowflake with explanation."""
+    def save_classification(self, domain, company_type, confidence_score, all_scores, 
+                           model_metadata, low_confidence, detection_method, 
+                           llm_explanation=None, apollo_company_data=None,
+                           apollo_person_data=None):
+        """Save domain classification to Snowflake with explanation and Apollo data."""
         if not self.connected:
             logger.info(f"Fallback: Not saving classification for {domain}")
             return True, None
@@ -255,12 +260,17 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Insert new record - including LLM_EXPLANATION field
+            # Convert Apollo data to JSON strings if provided
+            apollo_company_json = json.dumps(apollo_company_data) if apollo_company_data else None
+            apollo_person_json = json.dumps(apollo_person_data) if apollo_person_data else None
+            
+            # Insert new record - including Apollo data fields
             query = """
-                INSERT INTO DOMAIN_CLASSIFICATION 
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
                 (domain, company_type, confidence_score, all_scores, model_metadata, 
-                low_confidence, detection_method, classification_date, llm_explanation)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+                low_confidence, detection_method, classification_date, llm_explanation,
+                apollo_company_data, apollo_person_data)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s)
             """
             
             # Ensure explanation isn't too long
@@ -280,13 +290,15 @@ class SnowflakeConnector:
                 model_metadata, 
                 low_confidence, 
                 detection_method,
-                llm_explanation  # Include explanation as a parameter
+                llm_explanation,
+                apollo_company_json,
+                apollo_person_json
             )
             
             cursor.execute(query, params)
             
             conn.commit()
-            logger.info(f"Saved classification for {domain}: {company_type}")
+            logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
             return True, None
         except Exception as e:
             error_msg = traceback.format_exc()
