@@ -1,9 +1,10 @@
+"""Routes initialization module for the domain classifier API."""
 from domain_classifier.api.routes.health import register_health_routes
 from domain_classifier.api.routes.classify import register_classify_routes
 from domain_classifier.api.routes.enrich import register_enrich_routes
 from domain_classifier.api.routes.similarity import register_similarity_routes
 
-def register_all_routes(app, llm_classifier, snowflake_conn, vector_db_conn):
+def register_routes(app, llm_classifier, snowflake_conn, vector_db_conn):
     """Register all routes with the app."""
     
     # Register health routes
