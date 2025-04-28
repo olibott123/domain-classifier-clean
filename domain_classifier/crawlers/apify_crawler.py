@@ -62,7 +62,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
-def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Crawl a website using Scrapy first, then falling back to Apify if needed.
     
@@ -70,10 +70,11 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         url (str): The URL to crawl
         
     Returns:
-        tuple: (content, (error_type, error_detail))
+        tuple: (content, (error_type, error_detail), crawler_type)
             - content: The crawled content or None if failed
             - error_type: Type of error if failed, None if successful
             - error_detail: Detailed error message if failed, None if successful
+            - crawler_type: The type of crawler used ("scrapy", "apify", "direct", etc.)
     """
     try:
         logger.info(f"Starting crawl for {url}")
@@ -84,7 +85,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             socket.gethostbyname(domain)
         except socket.gaierror:
             logger.warning(f"Domain {domain} does not resolve - DNS error")
-            return None, ("dns_error", "This domain does not exist or cannot be resolved")
+            return None, ("dns_error", "This domain does not exist or cannot be resolved"), None
         
         # First try Scrapy crawler
         logger.info(f"Attempting crawl with Scrapy for {url}")
@@ -93,7 +94,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         # If Scrapy crawler succeeded, return the content
         if content and len(content.strip()) > 100:
             logger.info(f"Scrapy crawl successful for {url}")
-            return content, (None, None)
+            return content, (None, None), "scrapy"
             
         # Log the failure reason
         if error_type:
@@ -103,12 +104,21 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             
         # Fall back to Apify crawler
         logger.info(f"Attempting fallback crawl with Apify for {url}")
-        return apify_crawl(url)
+        content, (error_type, error_detail) = apify_crawl(url)
+        
+        if content and len(content.strip()) > 100:
+            return content, (error_type, error_detail), "apify"
+        elif content:
+            # Got some content, but not much
+            return content, (error_type, error_detail), "apify_minimal"
+        else:
+            # No content at all
+            return None, (error_type, error_detail), None
             
     except Exception as e:
         error_type, error_detail = detect_error_type(str(e))
         logger.error(f"Error crawling website: {e} (Type: {error_type})")
-        return None, (error_type, error_detail)
+        return None, (error_type, error_detail), None
 
 def apify_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
@@ -247,7 +257,7 @@ def apify_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[
                 logger.info("Trying direct request fallback...")
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
                 
-                direct_text, (direct_error_type, direct_error_detail) = direct_crawl(url)
+                direct_text, (direct_error_type, direct_error_detail), crawler_type = direct_crawl(url)
                 if direct_text:
                     logger.info(f"Direct request successful, got {len(direct_text)} characters")
                     return direct_text, (None, None)
@@ -264,7 +274,7 @@ def apify_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[
             
         # Try one last direct request if we have nothing else
         from domain_classifier.crawlers.direct_crawler import direct_crawl
-        final_text, _ = direct_crawl(url)
+        final_text, _, crawler_type = direct_crawl(url)
         if final_text:
             logger.info(f"Final direct request got {len(final_text)} characters")
             return final_text, (None, None)
