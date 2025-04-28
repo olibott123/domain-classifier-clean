@@ -6,6 +6,9 @@ from flask import request, jsonify
 from domain_classifier.utils.error_handling import detect_error_type, create_error_result
 from domain_classifier.storage.operations import save_to_snowflake
 
+# Import the classify route function
+from domain_classifier.api.routes.classify import classify_domain as classify_domain_route
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,8 @@ def register_enrich_routes(app, snowflake_conn):
             # Store original request
             original_request = request.json.copy()
             
-            # Call classify_domain directly (this will be available from the register_classify_routes)
-            classification_response = classify_domain()
+            # Call classify_domain route function directly
+            classification_response = classify_domain_route()
             
             # Extract response data and status code
             if isinstance(classification_response, tuple):
