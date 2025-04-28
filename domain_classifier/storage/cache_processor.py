@@ -70,6 +70,24 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
             llm_explanation = metadata.get('llm_explanation', '')
         except Exception as e:
             logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+            
+    # Extract Apollo data if available
+    apollo_company_data = None
+    apollo_person_data = None
+    
+    try:
+        if record.get('APOLLO_COMPANY_DATA'):
+            apollo_company_data = json.loads(record.get('APOLLO_COMPANY_DATA'))
+            logger.info(f"Found cached Apollo company data for {domain}")
+    except Exception as e:
+        logger.warning(f"Could not parse APOLLO_COMPANY_DATA for {domain}: {e}")
+    
+    try:
+        if record.get('APOLLO_PERSON_DATA'):
+            apollo_person_data = json.loads(record.get('APOLLO_PERSON_DATA'))
+            logger.info(f"Found cached Apollo person data for {domain}")
+    except Exception as e:
+        logger.warning(f"Could not parse APOLLO_PERSON_DATA for {domain}: {e}")
     
     # Ensure we have an explanation
     if not llm_explanation:
@@ -99,6 +117,27 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
         "source": "cached",
         "is_parked": is_parked
     }
+    
+    # Add Apollo data if available
+    if apollo_company_data:
+        result["apollo_data"] = apollo_company_data
+    
+    if apollo_person_data:
+        result["apollo_person_data"] = apollo_person_data
+    
+    # Generate recommendations if Apollo data is available
+    if apollo_company_data:
+        try:
+            from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
+            recommendation_engine = DomotzRecommendationEngine()
+            recommendations = recommendation_engine.generate_recommendations(
+                company_type, 
+                apollo_company_data
+            )
+            result["domotz_recommendations"] = recommendations
+            logger.info(f"Generated recommendations from cached Apollo data for {domain}")
+        except Exception as e:
+            logger.warning(f"Could not generate recommendations from cached data: {e}")
     
     # Add email and URL if provided
     if email:
