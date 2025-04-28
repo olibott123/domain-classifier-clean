@@ -1,4 +1,4 @@
-"""Apify-based crawler for domain classification."""
+"""Multi-crawler module for domain classification that tries Scrapy first, then Apify."""
 import requests
 import logging
 import time
@@ -9,6 +9,9 @@ from typing import Tuple, Optional, Any
 
 # Import settings for API keys
 from domain_classifier.config.settings import APIFY_TASK_ID, APIFY_API_TOKEN
+
+# Import Scrapy crawler
+from domain_classifier.crawlers.scrapy_crawler import scrapy_crawl
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -59,7 +62,65 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
-def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
+    """
+    Crawl a website using Scrapy first, then falling back to Apify if needed.
+    
+    Args:
+        url (str): The URL to crawl
+        
+    Returns:
+        tuple: (content, (error_type, error_detail), crawler_type)
+            - content: The crawled content or None if failed
+            - error_type: Type of error if failed, None if successful
+            - error_detail: Detailed error message if failed, None if successful
+            - crawler_type: The type of crawler used ("scrapy", "apify", "direct", etc.)
+    """
+    try:
+        logger.info(f"Starting crawl for {url}")
+        
+        # Quick DNS check before attempting full crawl
+        try:
+            domain = urlparse(url).netloc
+            socket.gethostbyname(domain)
+        except socket.gaierror:
+            logger.warning(f"Domain {domain} does not resolve - DNS error")
+            return None, ("dns_error", "This domain does not exist or cannot be resolved"), None
+        
+        # First try Scrapy crawler
+        logger.info(f"Attempting crawl with Scrapy for {url}")
+        content, (error_type, error_detail) = scrapy_crawl(url)
+        
+        # If Scrapy crawler succeeded, return the content
+        if content and len(content.strip()) > 100:
+            logger.info(f"Scrapy crawl successful for {url}")
+            return content, (None, None), "scrapy"
+            
+        # Log the failure reason
+        if error_type:
+            logger.warning(f"Scrapy crawler failed with error type: {error_type}. Falling back to Apify.")
+        else:
+            logger.warning(f"Scrapy crawler returned insufficient content. Falling back to Apify.")
+            
+        # Fall back to Apify crawler
+        logger.info(f"Attempting fallback crawl with Apify for {url}")
+        content, (error_type, error_detail) = apify_crawl(url)
+        
+        if content and len(content.strip()) > 100:
+            return content, (error_type, error_detail), "apify"
+        elif content:
+            # Got some content, but not much
+            return content, (error_type, error_detail), "apify_minimal"
+        else:
+            # No content at all
+            return None, (error_type, error_detail), None
+            
+    except Exception as e:
+        error_type, error_detail = detect_error_type(str(e))
+        logger.error(f"Error crawling website: {e} (Type: {error_type})")
+        return None, (error_type, error_detail), None
+
+def apify_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
     Crawl a website using Apify with improved multi-stage approach for JavaScript-heavy sites.
     
@@ -73,15 +134,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             - error_detail: Detailed error message if failed, None if successful
     """
     try:
-        logger.info(f"Starting crawl for {url}")
-        
-        # Quick DNS check before attempting full crawl
-        try:
-            domain = urlparse(url).netloc
-            socket.gethostbyname(domain)
-        except socket.gaierror:
-            logger.warning(f"Domain {domain} does not resolve - DNS error")
-            return None, ("dns_error", "This domain does not exist or cannot be resolved")
+        logger.info(f"Starting Apify crawl for {url}")
         
         # Start the crawl with standard settings
         endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs?token={APIFY_API_TOKEN}"
@@ -98,7 +151,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             response.raise_for_status()
             run_id = response.json()['data']['id']
         except Exception as e:
-            logger.error(f"Error starting crawl: {e}")
+            logger.error(f"Error starting Apify crawl: {e}")
             return None, detect_error_type(str(e))
             
         # Wait for crawl to complete
@@ -106,7 +159,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         
         max_attempts = 12
         for attempt in range(max_attempts):
-            logger.info(f"Checking crawl results, attempt {attempt+1}/{max_attempts}")
+            logger.info(f"Checking Apify crawl results, attempt {attempt+1}/{max_attempts}")
             
             try:
                 response = requests.get(endpoint, timeout=10)
@@ -117,17 +170,17 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
                     if data:
                         combined_text = ' '.join(item.get('text', '') for item in data if item.get('text'))
                         if combined_text and len(combined_text.strip()) > 100:
-                            logger.info(f"Crawl completed, got {len(combined_text)} characters of content")
+                            logger.info(f"Apify crawl completed, got {len(combined_text)} characters of content")
                             return combined_text, (None, None)
                         elif combined_text:
-                            logger.warning(f"Crawl returned minimal content: {len(combined_text)} characters")
+                            logger.warning(f"Apify crawl returned minimal content: {len(combined_text)} characters")
                             # Continue trying, might get better results on next attempt
                 else:
-                    logger.warning(f"Received status code {response.status_code} when checking crawl results")
+                    logger.warning(f"Received status code {response.status_code} when checking Apify crawl results")
             except requests.exceptions.Timeout:
-                logger.warning(f"Timeout when checking crawl status (attempt {attempt+1})")
+                logger.warning(f"Timeout when checking Apify status (attempt {attempt+1})")
             except Exception as e:
-                logger.warning(f"Error checking crawl status: {e}")
+                logger.warning(f"Error checking Apify status: {e}")
             
             # Stage 2: Try Puppeteer approach explicitly after a few normal attempts
             if attempt == 4:
@@ -204,7 +257,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
                 logger.info("Trying direct request fallback...")
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
                 
-                direct_text, (direct_error_type, direct_error_detail) = direct_crawl(url)
+                direct_text, (direct_error_type, direct_error_detail), crawler_type = direct_crawl(url)
                 if direct_text:
                     logger.info(f"Direct request successful, got {len(direct_text)} characters")
                     return direct_text, (None, None)
@@ -221,7 +274,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             
         # Try one last direct request if we have nothing else
         from domain_classifier.crawlers.direct_crawler import direct_crawl
-        final_text, _ = direct_crawl(url)
+        final_text, _, crawler_type = direct_crawl(url)
         if final_text:
             logger.info(f"Final direct request got {len(final_text)} characters")
             return final_text, (None, None)
@@ -230,5 +283,5 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         return None, ("timeout", "The website took too long to respond or has minimal crawlable content.")
     except Exception as e:
         error_type, error_detail = detect_error_type(str(e))
-        logger.error(f"Error crawling website: {e} (Type: {error_type})")
+        logger.error(f"Error crawling with Apify: {e} (Type: {error_type})")
         return None, (error_type, error_detail)

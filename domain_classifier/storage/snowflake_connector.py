@@ -131,7 +131,7 @@ class SnowflakeConnector:
             
         try:
             cursor = conn.cursor()
-            # Look for classifications not older than 30 days and include LLM_EXPLANATION field
+            # Look for classifications not older than 30 days and include crawler and classifier type fields
             query = """
                 SELECT
                     DOMAIN,
@@ -142,8 +142,11 @@ class SnowflakeConnector:
                     DETECTION_METHOD,
                     MODEL_METADATA,
                     CLASSIFICATION_DATE,
-                    LLM_EXPLANATION
-                FROM DOMAIN_CLASSIFICATION
+                    LLM_EXPLANATION,
+                    APOLLO_COMPANY_DATA,
+                    CRAWLER_TYPE,
+                    CLASSIFIER_TYPE
+                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
                 WHERE DOMAIN = %s
                 AND CLASSIFICATION_DATE > DATEADD(day, -30, CURRENT_TIMESTAMP())
                 ORDER BY CLASSIFICATION_DATE DESC
@@ -183,7 +186,7 @@ class SnowflakeConnector:
             cursor = conn.cursor()
             query = """
                 SELECT text_content
-                FROM DOMAIN_CONTENT
+                FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CONTENT
                 WHERE domain = %s
                 ORDER BY crawl_date DESC
                 LIMIT 1
@@ -225,7 +228,7 @@ class SnowflakeConnector:
             
             # Insert new record
             cursor.execute("""
-                INSERT INTO DOMAIN_CONTENT (domain, url, text_content, crawl_date)
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CONTENT (domain, url, text_content, crawl_date)
                 VALUES (%s, %s, %s, CURRENT_TIMESTAMP())
             """, (domain, url, content))
             
@@ -242,8 +245,11 @@ class SnowflakeConnector:
             if conn:
                 conn.close()
     
-    def save_classification(self, domain, company_type, confidence_score, all_scores, model_metadata, low_confidence, detection_method, llm_explanation=None):
-        """Save domain classification to Snowflake with explanation."""
+    def save_classification(self, domain, company_type, confidence_score, all_scores, 
+                           model_metadata, low_confidence, detection_method, 
+                           llm_explanation=None, apollo_company_data=None, 
+                           crawler_type=None, classifier_type=None):
+        """Save domain classification to Snowflake with explanation and Apollo data."""
         if not self.connected:
             logger.info(f"Fallback: Not saving classification for {domain}")
             return True, None
@@ -255,14 +261,6 @@ class SnowflakeConnector:
         try:
             cursor = conn.cursor()
             
-            # Insert new record - including LLM_EXPLANATION field
-            query = """
-                INSERT INTO DOMAIN_CLASSIFICATION 
-                (domain, company_type, confidence_score, all_scores, model_metadata, 
-                low_confidence, detection_method, classification_date, llm_explanation)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
-            """
-            
             # Ensure explanation isn't too long
             if llm_explanation and len(llm_explanation) > 5000:
                 # Truncate at a sentence boundary
@@ -272,7 +270,16 @@ class SnowflakeConnector:
                 else:
                     llm_explanation = llm_explanation[:4900] + "..."
             
-            params = (
+            # Basic fields that are always included
+            basic_query = """
+                INSERT INTO DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION 
+                (domain, company_type, confidence_score, all_scores, model_metadata, 
+                low_confidence, detection_method, classification_date, llm_explanation,
+                crawler_type, classifier_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s, %s, %s)
+            """
+            
+            basic_params = [
                 domain, 
                 company_type, 
                 confidence_score, 
@@ -280,13 +287,36 @@ class SnowflakeConnector:
                 model_metadata, 
                 low_confidence, 
                 detection_method,
-                llm_explanation  # Include explanation as a parameter
-            )
+                llm_explanation,
+                crawler_type,
+                classifier_type
+            ]
             
-            cursor.execute(query, params)
+            # Execute the basic insert
+            cursor.execute(basic_query, basic_params)
+            
+            # If we have Apollo data, update the record with separate statements
+            if apollo_company_data:
+                # Convert to JSON string if it's not already
+                if isinstance(apollo_company_data, dict):
+                    apollo_company_json = json.dumps(apollo_company_data)
+                else:
+                    apollo_company_json = apollo_company_data
+                    
+                # Run an UPDATE statement instead of trying to include in the INSERT
+                company_update = """
+                    UPDATE DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                    SET apollo_company_data = TO_VARIANT(%s)
+                    WHERE domain = %s AND classification_date = (
+                        SELECT MAX(classification_date) 
+                        FROM DOMOTZ_TESTING_SOURCE.EXTERNAL_PUSH.DOMAIN_CLASSIFICATION
+                        WHERE domain = %s
+                    )
+                """
+                cursor.execute(company_update, [apollo_company_json, domain, domain])
             
             conn.commit()
-            logger.info(f"Saved classification for {domain}: {company_type}")
+            logger.info(f"Saved classification with Apollo data for {domain}: {company_type}")
             return True, None
         except Exception as e:
             error_msg = traceback.format_exc()

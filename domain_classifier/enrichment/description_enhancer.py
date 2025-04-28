@@ -55,14 +55,16 @@ def enhance_company_description(basic_description: str, apollo_data: Dict[str, A
             
     return enhanced_description
 
-def generate_detailed_description(classification: Dict[str, Any], apollo_data: Optional[Dict[str, Any]] = None, apollo_person_data: Optional[Dict[str, Any]] = None) -> str:
+def generate_detailed_description(classification: Dict[str, Any], 
+                                apollo_data: Optional[Dict[str, Any]] = None, 
+                                apollo_person_data: Optional[Dict[str, Any]] = None) -> str:
     """
     Use Claude to generate a detailed company description.
     
     Args:
         classification: The classification result
         apollo_data: Optional company data from Apollo
-        apollo_person_data: Optional person data from Apollo
+        apollo_person_data: Optional person data from Apollo (kept for backwards compatibility)
         
     Returns:
         str: Detailed company description

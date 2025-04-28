@@ -191,10 +191,11 @@ def register_routes(app):
             # If no content yet and we're not using existing content, crawl the website
             error_type = None
             error_detail = None
+            crawler_type = None
             
             if not content and not use_existing_content:
                 logger.info(f"Crawling website for {domain}")
-                content, (error_type, error_detail) = crawl_website(url)
+                content, (error_type, error_detail), crawler_type = crawl_website(url)
                 
                 if not content:
                     error_result = create_error_result(domain, error_type, error_detail, email)
@@ -251,12 +252,30 @@ def register_routes(app):
                     
                 return jsonify(error_result), 500
             
+            # Determine classifier type
+            classifier_type = "claude-llm" if classification else None
+            
             # Save to Snowflake and Vector DB (always save, even for reclassifications)
-            save_to_snowflake(domain, url, content, classification, snowflake_conn)
+            save_to_snowflake(
+                domain=domain, 
+                url=url, 
+                content=content, 
+                classification=classification, 
+                snowflake_conn=snowflake_conn,
+                crawler_type=crawler_type,
+                classifier_type=classifier_type
+            )
             
             # Process the fresh classification result
             from domain_classifier.storage.result_processor import process_fresh_result
             result = process_fresh_result(classification, domain, email, url)
+
+            # Add crawler_type to the result
+            if crawler_type:
+                result["crawler_type"] = crawler_type
+                
+            # Add classifier_type to the result
+            result["classifier_type"] = classifier_type
 
             # Ensure result consistency
             result = validate_result_consistency(result, domain)
@@ -376,9 +395,10 @@ def register_routes(app):
                 logger.warning(f"Classification failed with status {status_code}, skipping enrichment")
                 return classification_response
             
-            # Extract domain and email from classification result
+            # Extract domain, email and crawler type from classification result
             domain = classification_result.get('domain')
             email = classification_result.get('email')  # This will be set if the input was an email
+            crawler_type = classification_result.get('crawler_type')  # Get crawler type from classification result
             
             if not domain:
                 logger.error("No domain found in classification result")
@@ -394,11 +414,8 @@ def register_routes(app):
             # Enrich with Apollo company data
             company_data = apollo.enrich_company(domain)
             
-            # If we have an email, also get person data
+            # Don't look up person data to save Apollo credits
             person_data = None
-            if email:
-                logger.info(f"Looking up person data for email: {email}")
-                person_data = apollo.search_person(email)
             
             # Import recommendation engine
             from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
@@ -425,7 +442,7 @@ def register_routes(app):
                 detailed_description = generate_detailed_description(
                     classification_result,
                     company_data,
-                    person_data
+                    None  # No person data passed
                 )
                 
                 if detailed_description and len(detailed_description) > 50:
@@ -438,12 +455,29 @@ def register_routes(app):
             # Add enrichment data to classification result
             classification_result['apollo_data'] = company_data or {}
             
-            # Add person data if available
-            if person_data:
-                classification_result['apollo_person_data'] = person_data
-            
             # Add recommendations
             classification_result['domotz_recommendations'] = recommendations
+            
+            # Make sure the crawler_type is preserved from the original classification
+            if not classification_result.get('crawler_type') and crawler_type:
+                classification_result['crawler_type'] = crawler_type
+                
+            # Save the enriched classification to Snowflake
+            from domain_classifier.storage.operations import save_to_snowflake
+            url = f"https://{domain}"
+            content = snowflake_conn.get_domain_content(domain)
+            
+            # Save the enhanced data to Snowflake (with Apollo data)
+            save_to_snowflake(
+                domain=domain, 
+                url=url, 
+                content=content, 
+                classification=classification_result,
+                snowflake_conn=snowflake_conn,
+                apollo_company_data=company_data,
+                crawler_type=crawler_type,  # Explicitly pass the crawler_type from the original classification
+                classifier_type="claude-llm-enriched"
+            )
             
             # Return the enriched result
             logger.info(f"Successfully enriched and generated recommendations for {domain}")
