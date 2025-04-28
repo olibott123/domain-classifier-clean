@@ -26,6 +26,10 @@ def create_app():
     # Set up middleware
     setup_cors(app)
     
+    # Set up JSON encoder
+    from domain_classifier.utils.json_encoder import CustomJSONEncoder
+    app.json_encoder = CustomJSONEncoder
+    
     # Initialize services
     # Get API key from environment
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -64,10 +68,6 @@ def create_app():
 
     # Register routes with all the services
     app = register_routes(app, llm_classifier, snowflake_conn, vector_db_conn)
-    
-    # Set up JSON encoder
-    from domain_classifier.utils.json_encoder import CustomJSONEncoder
-    app.json_encoder = CustomJSONEncoder
     
     return app
 
