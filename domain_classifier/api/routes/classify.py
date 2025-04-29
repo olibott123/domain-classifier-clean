@@ -22,8 +22,28 @@ from domain_classifier.storage.result_processor import process_fresh_result
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Runtime cache of domain classification results to avoid rechecking problematic domains
-DOMAIN_CACHE = {}
+# Create the problematic domains cache for compatibility with enrich.py
+PROBLEMATIC_DOMAINS_CACHE = {
+    "crapanzano.it": {
+        "domain": "crapanzano.it",
+        "error": "Known problematic domain",
+        "predicted_class": "Unknown",
+        "confidence_score": 0,
+        "confidence_scores": {
+            "Managed Service Provider": 0,
+            "Integrator - Commercial A/V": 0,
+            "Integrator - Residential A/V": 0,
+            "Internal IT Department": 0
+        },
+        "explanation": "This domain is known to have connection issues that prevent reliable crawling. The website initially responds but shows signs of unstable connections.",
+        "low_confidence": True,
+        "is_crawl_error": True,
+        "error_type": "connection_error",
+        "is_connection_error": True,
+        "final_classification": "0-NO DNS RESOLUTION",
+        "source": "cached_problematic_domain"
+    }
+}
 
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
@@ -80,17 +100,17 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             url = f"https://{domain}"
             logger.info(f"Processing classification request for {domain}")
 
-            # Check runtime domain cache
-            if domain in DOMAIN_CACHE:
-                logger.info(f"Using cached result for domain: {domain}")
-                cached_result = DOMAIN_CACHE[domain].copy()
+            # Check if this is a known problematic domain from our cache
+            if domain in PROBLEMATIC_DOMAINS_CACHE:
+                logger.info(f"Using cached response for known problematic domain: {domain}")
+                cached_result = PROBLEMATIC_DOMAINS_CACHE[domain].copy()
                 
                 # Update any dynamic fields
                 if email:
                     cached_result["email"] = email
                 cached_result["website_url"] = url
                 
-                return jsonify(cached_result), 503 if cached_result.get("is_crawl_error") else 200
+                return jsonify(cached_result), 503  # Service Unavailable
             
             # Check for domain override before any other processing
             domain_override = check_domain_override(domain)
@@ -125,8 +145,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"
                 
-                # Store in runtime cache for future requests
-                DOMAIN_CACHE[domain] = error_result.copy()
+                # Store in cache for future requests
+                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
                 
                 return jsonify(error_result), 503  # Service Unavailable
             elif potentially_flaky:
@@ -135,8 +155,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"  # Same classification for user consistency
                 
-                # Store in runtime cache for future requests
-                DOMAIN_CACHE[domain] = error_result.copy()
+                # Store in cache for future requests
+                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
                 
                 return jsonify(error_result), 503
             else:
@@ -206,57 +226,14 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             
             if not content and not use_existing_content:
                 logger.info(f"Crawling website for {domain}")
-                
-                # Add a timeout for crawling to prevent long waits
-                # This is a additional safety measure beyond DNS check
-                try:
-                    import threading
-                    import time
-                    
-                    # Create container for results
-                    crawler_result = {"content": None, "error": None, "crawler_type": None}
-                    
-                    # Create a function to run crawling with a timeout
-                    def crawl_with_timeout():
-                        try:
-                            content, error, crawler = crawl_website(url)
-                            crawler_result["content"] = content
-                            crawler_result["error"] = error
-                            crawler_result["crawler_type"] = crawler
-                        except Exception as e:
-                            logger.error(f"Error in crawl thread: {e}")
-                            crawler_result["error"] = (detect_error_type(str(e)))
-                    
-                    # Start crawl in a thread
-                    crawl_thread = threading.Thread(target=crawl_with_timeout)
-                    crawl_thread.daemon = True
-                    crawl_thread.start()
-                    
-                    # Wait for thread with timeout (60 seconds max)
-                    crawl_thread.join(timeout=60)
-                    
-                    # Check if thread is still alive (timeout occurred)
-                    if crawl_thread.is_alive():
-                        # Crawling is taking too long, abort
-                        logger.warning(f"Crawling timeout for {domain}")
-                        error_type = "timeout"
-                        error_detail = "The website took too long to crawl. This may indicate connectivity issues."
-                    else:
-                        # Get thread results
-                        content = crawler_result["content"]
-                        error_type, error_detail = crawler_result["error"] or (None, None)
-                        crawler_type = crawler_result["crawler_type"]
-                        
-                except Exception as e:
-                    logger.error(f"Error setting up crawl thread: {e}")
-                    error_type, error_detail = detect_error_type(str(e))
+                content, (error_type, error_detail), crawler_type = crawl_website(url)
                 
                 if not content:
                     error_result = create_error_result(domain, error_type, error_detail, email)
                     error_result["website_url"] = url
                     
-                    # Cache this error result
-                    DOMAIN_CACHE[domain] = error_result.copy()
+                    # Add to problematic domains cache
+                    PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
                     
                     return jsonify(error_result), 503  # Service Unavailable
             
@@ -346,9 +323,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Log the response for debugging
             logger.info(f"Sending fresh response to client")
             
-            # Cache successful result
-            DOMAIN_CACHE[domain] = result.copy()
-            
             return jsonify(result), 200
             
         except Exception as e:
@@ -417,54 +391,5 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             error_result = create_error_result("unknown", error_type, error_detail)
             error_result["error"] = str(e)
             return jsonify(error_result), 500
-    
-    @app.route('/quick-domain-check', methods=['POST', 'OPTIONS'])
-    def quick_domain_check():
-        """
-        Quick domain availability check without full classification.
-        Returns fast response about domain usability.
-        """
-        # Handle preflight requests
-        if request.method == 'OPTIONS':
-            return '', 204
-            
-        try:
-            data = request.json
-            domain = data.get('url', '').strip()
-            
-            if not domain:
-                return jsonify({"error": "URL is required"}), 400
-                
-            # Clean domain
-            if domain.startswith('http'):
-                parsed_url = urlparse(domain)
-                domain = parsed_url.netloc
-            
-            if '@' in domain:  # It's an email
-                domain = domain.split('@')[-1]
-                
-            if domain.startswith('www.'):
-                domain = domain[4:]
-                
-            # Check domain with our validator
-            has_dns, dns_error, potentially_flaky = check_domain_dns(domain)
-            
-            result = {
-                "domain": domain,
-                "is_valid": has_dns and not potentially_flaky,
-                "dns_resolves": has_dns,
-                "potentially_flaky": potentially_flaky,
-                "error": dns_error if not has_dns or potentially_flaky else None
-            }
-            
-            return jsonify(result), 200
-            
-        except Exception as e:
-            logger.error(f"Error in quick domain check: {e}")
-            return jsonify({
-                "domain": domain if 'domain' in locals() else "unknown",
-                "is_valid": False,
-                "error": str(e)
-            }), 500
             
     return app
