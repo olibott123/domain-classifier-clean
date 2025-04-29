@@ -4,6 +4,9 @@ import json
 import re
 from typing import Dict, Any, Optional
 
+# Import final classification utility
+from domain_classifier.utils.final_classification import determine_final_classification
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -198,13 +201,21 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
         # Add email to response if provided
         if email:
             result["email"] = email
+        
+        # Add error_type if present in classification
+        if "error_type" in classification:
+            result["error_type"] = classification["error_type"]
+            
+        # Determine and add the final classification
+        result["final_classification"] = determine_final_classification(result)
+        logger.info(f"Added final classification: {result['final_classification']} for {domain}")
             
         return result
         
     except Exception as e:
         logger.error(f"Error processing fresh result: {e}")
         # Return a basic result with error information
-        return {
+        error_result = {
             "domain": domain,
             "predicted_class": classification.get('predicted_class', 'Unknown'),
             "confidence_score": 50,
@@ -220,5 +231,7 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             "detection_method": "error_during_processing",
             "source": "error",
             "is_parked": False,
-            "error": str(e)
+            "error": str(e),
+            "final_classification": "4-IT"  # Default for error cases
         }
+        return error_result
