@@ -15,10 +15,6 @@ except ImportError:
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Runtime cache of problematic domains - this will be populated during execution
-# No need to pre-populate it - domains will be added as they're discovered
-PROBLEMATIC_DOMAINS = {}
-
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
@@ -67,7 +63,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
     """
-    Check if a domain has valid DNS resolution AND can reliably respond to HTTP requests.
+    Check if a domain has valid DNS resolution AND can respond to a basic HTTP request.
     Also detects potentially flaky sites that may fail during crawling.
     
     Args:
@@ -75,8 +71,8 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         
     Returns:
         tuple: (has_dns, error_message, potentially_flaky)
-            - has_dns: Whether the domain can be properly accessed
-            - error_message: Error message if validation failed
+            - has_dns: Whether the domain has DNS resolution
+            - error_message: Error message if DNS resolution failed
             - potentially_flaky: Whether the site shows signs of being flaky
     """
     potentially_flaky = False
@@ -89,15 +85,10 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
         
-        # Check if this domain is already known to be problematic
-        if clean_domain in PROBLEMATIC_DOMAINS:
-            logger.info(f"Domain {clean_domain} is known to be problematic: {PROBLEMATIC_DOMAINS[clean_domain]}")
-            return False, f"Domain is known to be problematic: {PROBLEMATIC_DOMAINS[clean_domain]}", True
-        
-        # Step 1: Try to resolve the domain
+        # Step 1: Try to resolve the domain using socket
         try:
             logger.info(f"Checking DNS resolution for domain: {clean_domain}")
-            socket.setdefaulttimeout(3.0)  # 3 seconds timeout
+            socket.setdefaulttimeout(3.0)  # 3 seconds max
             ip_address = socket.gethostbyname(clean_domain)
             logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
             
@@ -185,15 +176,10 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                         # If it failed with both HTTPS and HTTP, it's not usable
                         error_message = f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
                         
-                        # Add to problematic domains cache for future reference
-                        if potentially_flaky:
-                            PROBLEMATIC_DOMAINS[clean_domain] = "Resets connections when reading content"
-                            
                         return False, error_message, potentially_flaky
                 
                 # If we got here, we tried both protocols but couldn't read content properly
                 if potentially_flaky:
-                    PROBLEMATIC_DOMAINS[clean_domain] = "Responds to requests but fails during content transfer"
                     return False, f"The domain {domain} connects but fails during content transfer.", True
                 
                 return False, f"Could not establish a proper connection to {domain}.", False
@@ -204,7 +190,6 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                 # Check for specific flaky indicators
                 if "ConnectionResetError" in str(conn_e) or "reset by peer" in str(conn_e):
                     potentially_flaky = True
-                    PROBLEMATIC_DOMAINS[clean_domain] = "Resets connections"
                     
                 return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
                 
