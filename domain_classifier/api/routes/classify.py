@@ -100,14 +100,17 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 logger.info(f"Sending override response to client: {domain_override}")
                 return jsonify(domain_override), 200
             
-            # Check DNS resolution early to avoid unnecessary processing
+            # DNS check - critical for performance and avoiding unnecessary crawling
+            logger.info(f"Performing DNS check for domain: {domain}")
             has_dns, dns_error = check_domain_dns(domain)
             if not has_dns:
-                logger.warning(f"Domain {domain} failed DNS resolution check: {dns_error}")
+                logger.warning(f"DNS check failed for domain {domain}: {dns_error}")
                 error_result = create_error_result(domain, "dns_error", dns_error, email)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"
                 return jsonify(error_result), 503  # Service Unavailable
+            else:
+                logger.info(f"DNS check passed for domain: {domain}")
             
             # Check for existing classification if not forcing reclassification
             if not force_reclassify:
