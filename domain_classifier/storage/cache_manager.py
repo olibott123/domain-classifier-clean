@@ -3,6 +3,9 @@ import logging
 import json
 from typing import Dict, Any, Optional
 
+# Import final classification utility
+from domain_classifier.utils.final_classification import determine_final_classification
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,14 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
     
     if url:
         result["website_url"] = url
+    
+    # Add error_type if present in record
+    if record.get('ERROR_TYPE'):
+        result["error_type"] = record.get('ERROR_TYPE')
+        
+    # Determine and add the final classification
+    result["final_classification"] = determine_final_classification(result)
+    logger.info(f"Added final classification: {result['final_classification']} for {domain}")
     
     return result
 
