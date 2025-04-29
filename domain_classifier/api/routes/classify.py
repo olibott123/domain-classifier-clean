@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 # Import domain utilities
 from domain_classifier.utils.domain_utils import extract_domain_from_email
-from domain_classifier.utils.error_handling import detect_error_type, create_error_result
+from domain_classifier.utils.error_handling import detect_error_type, create_error_result, check_domain_dns
 
 # Import configuration
 from domain_classifier.config.overrides import check_domain_override
@@ -86,9 +86,28 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 # Add website URL for clickable link
                 domain_override["website_url"] = url
                 
+                # Add final classification based on predicted class
+                if domain_override.get("predicted_class") == "Managed Service Provider":
+                    domain_override["final_classification"] = "3-MSP"
+                elif domain_override.get("predicted_class") == "Integrator - Commercial A/V":
+                    domain_override["final_classification"] = "5-Commercial Integrator"
+                elif domain_override.get("predicted_class") == "Integrator - Residential A/V":
+                    domain_override["final_classification"] = "6-Residential Integrator"
+                else:
+                    domain_override["final_classification"] = "4-IT"
+                
                 # Return the override directly
                 logger.info(f"Sending override response to client: {domain_override}")
                 return jsonify(domain_override), 200
+            
+            # Check DNS resolution early to avoid unnecessary processing
+            has_dns, dns_error = check_domain_dns(domain)
+            if not has_dns:
+                logger.warning(f"Domain {domain} failed DNS resolution check: {dns_error}")
+                error_result = create_error_result(domain, "dns_error", dns_error, email)
+                error_result["website_url"] = url
+                error_result["final_classification"] = "0-NO DNS RESOLUTION"
+                return jsonify(error_result), 503  # Service Unavailable
             
             # Check for existing classification if not forcing reclassification
             if not force_reclassify:
@@ -137,7 +156,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     "explanation": f"We could not find previously stored content for {domain}. Please try recrawling instead.",
                     "low_confidence": True,
                     "no_existing_content": True,
-                    "website_url": url
+                    "website_url": url,
+                    "final_classification": "4-IT"
                 }
                 
                 # Add email to response if input was an email
@@ -175,7 +195,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     },
                     "explanation": "Our classification system is temporarily unavailable. Please try again later.",
                     "low_confidence": True,
-                    "website_url": url
+                    "website_url": url,
+                    "final_classification": "4-IT"
                 }
                 
                 # Add email to error response if input was an email
@@ -201,7 +222,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     },
                     "explanation": f"We encountered an issue while analyzing {domain}.",
                     "low_confidence": True,
-                    "website_url": url
+                    "website_url": url,
+                    "final_classification": "4-IT"
                 }
                 
                 # Add email to error response if input was an email
