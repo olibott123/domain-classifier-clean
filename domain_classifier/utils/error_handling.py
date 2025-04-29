@@ -15,6 +15,10 @@ except ImportError:
 # Set up logging
 logger = logging.getLogger(__name__)
 
+# Runtime cache of problematic domains - this will be populated during execution
+# No need to pre-populate it - domains will be added as they're discovered
+PROBLEMATIC_DOMAINS = {}
+
 def detect_error_type(error_message: str) -> Tuple[str, str]:
     """
     Analyze error message to determine the specific type of error.
@@ -63,7 +67,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
     """
-    Check if a domain has valid DNS resolution AND can respond to a basic HTTP request.
+    Check if a domain has valid DNS resolution AND can reliably respond to HTTP requests.
     Also detects potentially flaky sites that may fail during crawling.
     
     Args:
@@ -71,8 +75,8 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         
     Returns:
         tuple: (has_dns, error_message, potentially_flaky)
-            - has_dns: Whether the domain has DNS resolution
-            - error_message: Error message if DNS resolution failed
+            - has_dns: Whether the domain can be properly accessed
+            - error_message: Error message if validation failed
             - potentially_flaky: Whether the site shows signs of being flaky
     """
     potentially_flaky = False
@@ -85,128 +89,135 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
         
-        # Step 1: Try to resolve the domain using socket
+        # Check if this domain is already known to be problematic
+        if clean_domain in PROBLEMATIC_DOMAINS:
+            logger.info(f"Domain {clean_domain} is known to be problematic: {PROBLEMATIC_DOMAINS[clean_domain]}")
+            return False, f"Domain is known to be problematic: {PROBLEMATIC_DOMAINS[clean_domain]}", True
+        
+        # Step 1: Try to resolve the domain
         try:
             logger.info(f"Checking DNS resolution for domain: {clean_domain}")
+            socket.setdefaulttimeout(3.0)  # 3 seconds timeout
             ip_address = socket.gethostbyname(clean_domain)
             logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
             
-            # Step 2: Try an actual HTTP request with a short timeout
+            # Step 2: Try to establish a reliable HTTP connection
             try:
-                logger.info(f"Attempting HTTP request to {clean_domain}...")
-                
-                # Set very strict timeout to avoid waiting too long
-                http_timeout = 5.0  # 5 seconds
-                
-                # Create session to control timeout strictly
+                logger.info(f"Attempting HTTP connection check for {clean_domain}")
                 session = requests.Session()
                 
-                # Try HTTPS first (most sites use HTTPS)
-                has_https_error = False
+                # Try HTTPS first
+                success = False
                 try:
                     url = f"https://{clean_domain}"
                     response = session.get(
                         url, 
-                        timeout=http_timeout,
+                        timeout=5.0,
                         headers={
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                         },
-                        allow_redirects=True,
-                        stream=True  # Don't download the entire content
+                        stream=True
                     )
                     
-                    # Try to get a bit of the content
+                    # CRITICAL: Actually try to read a chunk of content
+                    # This is what will detect connection issues with problematic sites
                     try:
-                        _ = next(response.iter_content(1024), None)
-                    except ConnectionResetError:
-                        has_https_error = True
+                        chunk = next(response.iter_content(1024), None)
+                        if chunk:
+                            success = True
+                            logger.info(f"Successfully read content chunk from {clean_domain}")
+                        else:
+                            potentially_flaky = True
+                            logger.warning(f"No content received from {clean_domain}")
+                    except Exception as read_error:
+                        logger.warning(f"Error reading content from {clean_domain}: {read_error}")
                         potentially_flaky = True
-                        logger.warning(f"Connection reset when reading HTTPS content from {clean_domain}")
                     
-                    # Close the response
                     response.close()
                     
-                    if not has_https_error:
-                        logger.info(f"HTTP request to {url} succeeded with status {response.status_code}")
-                        return True, None, potentially_flaky
+                    if success:
+                        return True, None, False
                     
-                except (ConnectionError, Timeout) as https_e:
-                    # Check for specific error types that indicate flaky sites
-                    if "ConnectionResetError" in str(https_e) or "reset by peer" in str(https_e):
-                        potentially_flaky = True
-                        logger.warning(f"HTTPS reset connection for {clean_domain} - potentially flaky site")
-                    
-                    # HTTPS failed, try HTTP
+                except (ConnectionError, Timeout, RequestException) as https_e:
                     logger.warning(f"HTTPS failed for {clean_domain}, trying HTTP: {https_e}")
                     
+                    # Look for reset indicators
+                    if "ConnectionResetError" in str(https_e) or "reset by peer" in str(https_e):
+                        potentially_flaky = True
+                    
+                    # Try HTTP as fallback
                     try:
                         url = f"http://{clean_domain}"
                         response = session.get(
                             url, 
-                            timeout=http_timeout,
+                            timeout=5.0,
                             headers={
                                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                             },
-                            allow_redirects=True,
-                            stream=True  # Don't download the entire content
+                            stream=True
                         )
                         
-                        # Try to get a bit of the content
-                        has_http_error = False
+                        # CRITICAL: Actually try to read a chunk of content
                         try:
-                            _ = next(response.iter_content(1024), None)
-                        except ConnectionResetError:
-                            has_http_error = True
+                            chunk = next(response.iter_content(1024), None)
+                            if chunk:
+                                success = True
+                                logger.info(f"Successfully read content chunk from {clean_domain} (HTTP)")
+                            else:
+                                potentially_flaky = True
+                                logger.warning(f"No content received from {clean_domain} (HTTP)")
+                        except Exception as read_error:
+                            logger.warning(f"Error reading content from {clean_domain} (HTTP): {read_error}")
                             potentially_flaky = True
-                            logger.warning(f"Connection reset when reading HTTP content from {clean_domain}")
                         
-                        # Close the response
                         response.close()
                         
-                        if not has_http_error:
-                            logger.info(f"HTTP request to {url} succeeded with status {response.status_code}")
-                            return True, None, potentially_flaky
-                        else:
-                            return False, f"The domain {domain} resolves but resets connections when reading content. The server might be misconfigured or blocking crawlers.", potentially_flaky
+                        if success:
+                            return True, None, False
                         
-                    except (ConnectionError, Timeout) as http_e:
-                        # Check for specific error types that indicate flaky sites
+                    except (ConnectionError, Timeout, RequestException) as http_e:
+                        logger.warning(f"HTTP also failed for {clean_domain}: {http_e}")
+                        
+                        # Look for reset indicators
                         if "ConnectionResetError" in str(http_e) or "reset by peer" in str(http_e):
                             potentially_flaky = True
-                            logger.warning(f"HTTP also reset connection for {clean_domain} - potentially flaky site")
+                            
+                        # If it failed with both HTTPS and HTTP, it's not usable
+                        error_message = f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
                         
-                        logger.warning(f"HTTP also failed for {clean_domain}: {http_e}")
-                        return False, f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests.", potentially_flaky
+                        # Add to problematic domains cache for future reference
+                        if potentially_flaky:
+                            PROBLEMATIC_DOMAINS[clean_domain] = "Resets connections when reading content"
+                            
+                        return False, error_message, potentially_flaky
                 
-                except RequestException as req_e:
-                    # Check for specific error types that indicate flaky sites
-                    if "ConnectionResetError" in str(req_e) or "reset by peer" in str(req_e):
-                        potentially_flaky = True
-                        logger.warning(f"Request error with connection reset for {clean_domain} - potentially flaky site")
-                    
-                    # Other request errors
-                    logger.warning(f"HTTP request error for {clean_domain}: {req_e}")
-                    return False, f"The domain {domain} resolves but encountered an error during HTTP request: {req_e}", potentially_flaky
+                # If we got here, we tried both protocols but couldn't read content properly
+                if potentially_flaky:
+                    PROBLEMATIC_DOMAINS[clean_domain] = "Responds to requests but fails during content transfer"
+                    return False, f"The domain {domain} connects but fails during content transfer.", True
+                
+                return False, f"Could not establish a proper connection to {domain}.", False
                 
             except Exception as conn_e:
-                # Check for specific error types that indicate flaky sites
+                logger.warning(f"Connection error for {clean_domain}: {conn_e}")
+                
+                # Check for specific flaky indicators
                 if "ConnectionResetError" in str(conn_e) or "reset by peer" in str(conn_e):
                     potentially_flaky = True
-                    logger.warning(f"Connection error with reset for {clean_domain} - potentially flaky site")
-                
-                logger.warning(f"Connection error for {clean_domain}: {conn_e}")
-                return False, f"The domain {domain} resolves but cannot be connected to via HTTP. The server might be down or blocking connections.", potentially_flaky
+                    PROBLEMATIC_DOMAINS[clean_domain] = "Resets connections"
+                    
+                return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections.", potentially_flaky
                 
         except socket.gaierror as e:
             logger.warning(f"DNS resolution failed for {domain}: {e}")
-            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", potentially_flaky
+            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured.", False
             
     except socket.timeout as e:
         logger.warning(f"DNS resolution timed out for {domain}: {e}")
-        return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding.", potentially_flaky
+        return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding.", False
     except Exception as e:
         logger.error(f"Unexpected error checking domain {domain}: {e}")
-        return False, f"Error checking {domain}: {e}", potentially_flaky
+        return False, f"Error checking {domain}: {e}", False
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
                         error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
