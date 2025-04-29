@@ -1,6 +1,8 @@
 """Error handling utilities for domain classification."""
 import logging
 import socket
+import requests
+from requests.exceptions import RequestException, Timeout, ConnectionError
 from typing import Dict, Any, Tuple, Optional
 
 # Import final classification utility (if we can - use try/except to avoid circular imports)
@@ -39,7 +41,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
     
     # Connection errors
-    elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error', 'connection reset']):
+    elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error', 'connection reset', 'connection lost']):
         return "connection_error", "Could not establish a connection to the website. It may be down or blocking our requests."
     
     # 4XX HTTP errors
@@ -61,7 +63,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
     """
-    Check if a domain has valid DNS resolution AND basic connectivity with strict timeout.
+    Check if a domain has valid DNS resolution AND can respond to a basic HTTP request.
     
     Args:
         domain (str): The domain to check
@@ -77,48 +79,92 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
         
-        # Set a very short timeout for DNS resolution
-        original_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(3.0)  # 3 seconds max
-            
-        # Step 1: Try to resolve the domain
+        # Step 1: Try to resolve the domain using socket
         try:
             logger.info(f"Checking DNS resolution for domain: {clean_domain}")
             ip_address = socket.gethostbyname(clean_domain)
             logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
             
-            # Step 2: Try to establish a basic TCP connection to port 80 (HTTP)
+            # Step 2: Try an actual HTTP request with a short timeout
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(3.0)  # 3 second timeout
-                logger.info(f"Attempting to connect to {clean_domain} ({ip_address}) on port 80...")
-                result = s.connect_ex((ip_address, 80))
-                s.close()
+                logger.info(f"Attempting HTTP request to {clean_domain}...")
                 
-                if result != 0:
-                    logger.warning(f"TCP connection to {clean_domain}:80 failed with error code {result}")
-                    return False, f"The domain {domain} resolves but appears unreachable. The server might be down or blocking connections."
+                # Set very strict timeout to avoid waiting too long
+                http_timeout = 5.0  # 5 seconds
                 
-                logger.info(f"TCP connection to {clean_domain}:80 succeeded")
-                return True, None
+                # Create session to control timeout strictly
+                session = requests.Session()
                 
-            except socket.error as conn_e:
+                # Try HTTPS first (most sites use HTTPS)
+                try:
+                    url = f"https://{clean_domain}"
+                    response = session.get(
+                        url, 
+                        timeout=http_timeout,
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        },
+                        allow_redirects=True,
+                        stream=True  # Don't download the entire content
+                    )
+                    
+                    # Just read a bit of the content to test the connection
+                    _ = next(response.iter_content(1024), None)
+                    
+                    # Close the response
+                    response.close()
+                    
+                    logger.info(f"HTTP request to {url} succeeded with status {response.status_code}")
+                    return True, None
+                    
+                except (ConnectionError, Timeout) as https_e:
+                    # HTTPS failed, try HTTP
+                    logger.warning(f"HTTPS failed for {clean_domain}, trying HTTP: {https_e}")
+                    
+                    try:
+                        url = f"http://{clean_domain}"
+                        response = session.get(
+                            url, 
+                            timeout=http_timeout,
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                            },
+                            allow_redirects=True,
+                            stream=True  # Don't download the entire content
+                        )
+                        
+                        # Just read a bit of the content to test the connection
+                        _ = next(response.iter_content(1024), None)
+                        
+                        # Close the response
+                        response.close()
+                        
+                        logger.info(f"HTTP request to {url} succeeded with status {response.status_code}")
+                        return True, None
+                        
+                    except (ConnectionError, Timeout) as http_e:
+                        logger.warning(f"HTTP also failed for {clean_domain}: {http_e}")
+                        return False, f"The domain {domain} resolves but the web server is not responding properly. The server might be misconfigured or blocking requests."
+                
+                except RequestException as req_e:
+                    # Other request errors
+                    logger.warning(f"HTTP request error for {clean_domain}: {req_e}")
+                    return False, f"The domain {domain} resolves but encountered an error during HTTP request: {req_e}"
+                
+            except Exception as conn_e:
                 logger.warning(f"Connection error for {clean_domain}: {conn_e}")
-                return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections."
+                return False, f"The domain {domain} resolves but cannot be connected to via HTTP. The server might be down or blocking connections."
                 
         except socket.gaierror as e:
             logger.warning(f"DNS resolution failed for {domain}: {e}")
             return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
             
     except socket.timeout as e:
-        logger.warning(f"DNS resolution or connection timed out for {domain}: {e}")
+        logger.warning(f"DNS resolution timed out for {domain}: {e}")
         return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding."
     except Exception as e:
-        logger.error(f"Unexpected error checking DNS and connectivity for {domain}: {e}")
-        return False, f"Error checking DNS and connectivity for {domain}: {e}"
-    finally:
-        # Reset timeout to default
-        socket.setdefaulttimeout(original_timeout)
+        logger.error(f"Unexpected error checking domain {domain}: {e}")
+        return False, f"Error checking {domain}: {e}"
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
                         error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
