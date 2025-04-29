@@ -1,6 +1,14 @@
 """Error handling utilities for domain classification."""
 import logging
+import socket
 from typing import Dict, Any, Tuple, Optional
+
+# Import final classification utility (if we can - use try/except to avoid circular imports)
+try:
+    from domain_classifier.utils.final_classification import determine_final_classification
+    HAS_FINAL_CLASSIFICATION = True
+except ImportError:
+    HAS_FINAL_CLASSIFICATION = False
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -27,7 +35,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
             return "ssl_error", "The website has SSL certificate issues."
     
     # DNS resolution errors
-    elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host']):
+    elif any(phrase in error_message for phrase in ['getaddrinfo failed', 'name or service not known', 'no such host', 'dns']):
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
     
     # Connection errors
@@ -50,6 +58,34 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
+
+def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a domain has valid DNS resolution before attempting to crawl.
+    
+    Args:
+        domain (str): The domain to check
+        
+    Returns:
+        tuple: (has_dns, error_message)
+    """
+    try:
+        # Remove protocol if present
+        clean_domain = domain.replace('https://', '').replace('http://', '')
+        
+        # Remove path if present
+        if '/' in clean_domain:
+            clean_domain = clean_domain.split('/', 1)[0]
+            
+        # Try to resolve the domain
+        socket.gethostbyname(clean_domain)
+        return True, None
+    except socket.gaierror as e:
+        logger.warning(f"DNS resolution failed for {domain}: {e}")
+        return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+    except Exception as e:
+        logger.error(f"Unexpected error checking DNS for {domain}: {e}")
+        return False, f"Error checking DNS for {domain}: {e}"
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
                         error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
@@ -75,7 +111,7 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             "Managed Service Provider": 0,
             "Integrator - Commercial A/V": 0,
             "Integrator - Residential A/V": 0,
-            "Internal IT Department": 0  # Include Internal IT Department with score 0
+            "Internal IT Department": 0
         },
         "low_confidence": True,
         "is_crawl_error": True
@@ -85,13 +121,15 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
     if email:
         error_result["email"] = email
     
+    # Add error_type if provided
+    if error_type:
+        error_result["error_type"] = error_type
+    
     # Default explanation
     explanation = f"We were unable to retrieve content from {domain}. This could be due to a server timeout or the website being unavailable. Without analyzing the website content, we cannot determine the company type."
     
     # Enhanced error handling based on error type
     if error_type:
-        error_result["error_type"] = error_type
-        
         if error_type.startswith('ssl_'):
             explanation = f"We couldn't analyze {domain} because of SSL certificate issues. "
             if error_type == 'ssl_expired':
@@ -136,6 +174,19 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             explanation += f" {error_detail}"
     
     error_result["explanation"] = explanation
+    
+    # Add final classification if possible
+    if HAS_FINAL_CLASSIFICATION:
+        # Import here to avoid circular imports
+        from domain_classifier.utils.final_classification import determine_final_classification
+        error_result["final_classification"] = determine_final_classification(error_result)
+    else:
+        # Default for DNS errors
+        if error_type == "dns_error":
+            error_result["final_classification"] = "0-NO DNS RESOLUTION"
+        else:
+            error_result["final_classification"] = "4-IT"  # Default fallback
+    
     return error_result
 
 def handle_request_exception(e: Exception, domain: str, email: Optional[str] = None) -> Dict[str, Any]:
