@@ -61,7 +61,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
     """
-    Check if a domain has valid DNS resolution before attempting to crawl.
+    Check if a domain has valid DNS resolution with strict timeout.
     
     Args:
         domain (str): The domain to check
@@ -76,16 +76,28 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
         # Remove path if present
         if '/' in clean_domain:
             clean_domain = clean_domain.split('/', 1)[0]
+        
+        # Set a very short timeout for DNS resolution
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(3.0)  # 3 seconds max
             
         # Try to resolve the domain
+        logger.info(f"Checking DNS resolution for domain: {clean_domain}")
         socket.gethostbyname(clean_domain)
+        logger.info(f"DNS resolution successful for domain: {clean_domain}")
         return True, None
     except socket.gaierror as e:
         logger.warning(f"DNS resolution failed for {domain}: {e}")
         return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+    except socket.timeout as e:
+        logger.warning(f"DNS resolution timed out for {domain}: {e}")
+        return False, f"DNS resolution timed out for {domain}. Domain may not exist or DNS server is not responding."
     except Exception as e:
         logger.error(f"Unexpected error checking DNS for {domain}: {e}")
         return False, f"Error checking DNS for {domain}: {e}"
+    finally:
+        # Reset timeout to default
+        socket.setdefaulttimeout(original_timeout)
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
                         error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
