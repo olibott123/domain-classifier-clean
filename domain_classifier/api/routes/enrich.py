@@ -8,6 +8,9 @@ from domain_classifier.utils.error_handling import detect_error_type, create_err
 from domain_classifier.storage.operations import save_to_snowflake
 from domain_classifier.utils.final_classification import determine_final_classification
 
+# Import problematic domains cache
+from domain_classifier.api.routes.classify import PROBLEMATIC_DOMAINS_CACHE
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,34 @@ def register_enrich_routes(app, snowflake_conn):
             # Determine if input is an email
             is_email = '@' in input_value
             email = input_value if is_email else None
+            
+            # Extract domain for checking cache
+            domain = None
+            if is_email and '@' in input_value:
+                domain = input_value.split('@')[-1].strip().lower()
+            else:
+                # Basic domain extraction for URL
+                domain = input_value.replace('https://', '').replace('http://', '')
+                if '/' in domain:
+                    domain = domain.split('/', 1)[0]
+                if domain.startswith('www.'):
+                    domain = domain[4:]
+                
+            # Check if this is a known problematic domain before proceeding
+            if domain and domain in PROBLEMATIC_DOMAINS_CACHE:
+                logger.info(f"Using cached response for known problematic domain in enrich: {domain}")
+                cached_result = PROBLEMATIC_DOMAINS_CACHE[domain].copy()
+                
+                # Update any dynamic fields
+                if email:
+                    cached_result["email"] = email
+                cached_result["website_url"] = f"https://{domain}"
+                
+                # Add final classification if not present
+                if "final_classification" not in cached_result:
+                    cached_result["final_classification"] = "0-NO DNS RESOLUTION"
+                    
+                return jsonify(cached_result), 503  # Service Unavailable
             
             # First perform standard classification by making an internal request
             # We'll use the routes directly from the app, rather than importing functions
