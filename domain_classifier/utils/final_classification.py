@@ -15,20 +15,30 @@ def determine_final_classification(result: Dict[str, Any]) -> str:
     Returns:
         str: The final classification code
     """
+    logger.info(f"Determining final classification for domain: {result.get('domain')}")
+    logger.info(f"Result keys: {list(result.keys())}")
+    logger.info(f"Error type: {result.get('error_type')}")
+    logger.info(f"Is parked: {result.get('is_parked')}")
+    logger.info(f"Predicted class: {result.get('predicted_class')}")
+    
     # Check for DNS resolution errors first
-    if result.get("error_type") == "dns_error" or "DNS" in result.get("explanation", ""):
+    if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
+        logger.info(f"Classifying as NO DNS RESOLUTION due to error_type={result.get('error_type')}")
         return "0-NO DNS RESOLUTION"
         
     # Check for parked domains
     if result.get("is_parked", False) or result.get("predicted_class") == "Parked Domain":
         # Check if Apollo data is available
-        if result.get("apollo_data") and any(result["apollo_data"].values()):
+        has_apollo = bool(result.get("apollo_data") and any(result["apollo_data"].values()))
+        logger.info(f"Domain is parked. Has Apollo data: {has_apollo}")
+        if has_apollo:
             return "2-PARKED DOMAIN w Apollo"
         else:
             return "1-PARKED DOMAIN w/o Apollo"
     
     # Check for service business types
     predicted_class = result.get("predicted_class", "")
+    logger.info(f"Checking service business type: {predicted_class}")
     
     if predicted_class == "Managed Service Provider":
         return "3-MSP"
@@ -40,4 +50,5 @@ def determine_final_classification(result: Dict[str, Any]) -> str:
         return "6-Residential Integrator"
     
     # Default for unknown or error cases
+    logger.info(f"No specific classification matched, defaulting to 4-IT")
     return "4-IT"  # Default to IT if we can't determine
