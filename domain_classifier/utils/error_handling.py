@@ -39,7 +39,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
         return "dns_error", "The domain could not be resolved. It may not exist or DNS records may be misconfigured."
     
     # Connection errors
-    elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error']):
+    elif any(phrase in error_message for phrase in ['connection refused', 'connection timed out', 'connection error', 'connection reset']):
         return "connection_error", "Could not establish a connection to the website. It may be down or blocking our requests."
     
     # 4XX HTTP errors
@@ -61,7 +61,7 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
 
 def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
     """
-    Check if a domain has valid DNS resolution with strict timeout.
+    Check if a domain has valid DNS resolution AND basic connectivity with strict timeout.
     
     Args:
         domain (str): The domain to check
@@ -81,20 +81,41 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str]]:
         original_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(3.0)  # 3 seconds max
             
-        # Try to resolve the domain
-        logger.info(f"Checking DNS resolution for domain: {clean_domain}")
-        socket.gethostbyname(clean_domain)
-        logger.info(f"DNS resolution successful for domain: {clean_domain}")
-        return True, None
-    except socket.gaierror as e:
-        logger.warning(f"DNS resolution failed for {domain}: {e}")
-        return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+        # Step 1: Try to resolve the domain
+        try:
+            logger.info(f"Checking DNS resolution for domain: {clean_domain}")
+            ip_address = socket.gethostbyname(clean_domain)
+            logger.info(f"DNS resolution successful for domain: {clean_domain} (IP: {ip_address})")
+            
+            # Step 2: Try to establish a basic TCP connection to port 80 (HTTP)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(3.0)  # 3 second timeout
+                logger.info(f"Attempting to connect to {clean_domain} ({ip_address}) on port 80...")
+                result = s.connect_ex((ip_address, 80))
+                s.close()
+                
+                if result != 0:
+                    logger.warning(f"TCP connection to {clean_domain}:80 failed with error code {result}")
+                    return False, f"The domain {domain} resolves but appears unreachable. The server might be down or blocking connections."
+                
+                logger.info(f"TCP connection to {clean_domain}:80 succeeded")
+                return True, None
+                
+            except socket.error as conn_e:
+                logger.warning(f"Connection error for {clean_domain}: {conn_e}")
+                return False, f"The domain {domain} resolves but cannot be connected to. The server might be down or blocking connections."
+                
+        except socket.gaierror as e:
+            logger.warning(f"DNS resolution failed for {domain}: {e}")
+            return False, f"The domain {domain} could not be resolved. It may not exist or DNS records may be misconfigured."
+            
     except socket.timeout as e:
-        logger.warning(f"DNS resolution timed out for {domain}: {e}")
-        return False, f"DNS resolution timed out for {domain}. Domain may not exist or DNS server is not responding."
+        logger.warning(f"DNS resolution or connection timed out for {domain}: {e}")
+        return False, f"Timed out while checking {domain}. Domain may not exist or the server is not responding."
     except Exception as e:
-        logger.error(f"Unexpected error checking DNS for {domain}: {e}")
-        return False, f"Error checking DNS for {domain}: {e}"
+        logger.error(f"Unexpected error checking DNS and connectivity for {domain}: {e}")
+        return False, f"Error checking DNS and connectivity for {domain}: {e}"
     finally:
         # Reset timeout to default
         socket.setdefaulttimeout(original_timeout)
@@ -193,8 +214,8 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
         from domain_classifier.utils.final_classification import determine_final_classification
         error_result["final_classification"] = determine_final_classification(error_result)
     else:
-        # Default for DNS errors
-        if error_type == "dns_error":
+        # Default for DNS errors or connection errors
+        if error_type in ["dns_error", "connection_error"]:
             error_result["final_classification"] = "0-NO DNS RESOLUTION"
         else:
             error_result["final_classification"] = "4-IT"  # Default fallback
