@@ -21,6 +21,29 @@ from domain_classifier.storage.result_processor import process_fresh_result
 # Set up logging
 logger = logging.getLogger(__name__)
 
+# Cache for known problematic domains - accessible to both classify-domain and classify-and-enrich
+PROBLEMATIC_DOMAINS_CACHE = {
+    "crapanzano.it": {
+        "domain": "crapanzano.it",
+        "error": "Known problematic domain",
+        "predicted_class": "Unknown",
+        "confidence_score": 0,
+        "confidence_scores": {
+            "Managed Service Provider": 0,
+            "Integrator - Commercial A/V": 0,
+            "Integrator - Residential A/V": 0,
+            "Internal IT Department": 0
+        },
+        "explanation": "This domain is known to have connection issues that prevent reliable crawling. The website initially responds but shows signs of unstable connections.",
+        "low_confidence": True,
+        "is_crawl_error": True,
+        "error_type": "connection_error",
+        "is_connection_error": True,
+        "final_classification": "0-NO DNS RESOLUTION",
+        "source": "cached_problematic_domain"
+    }
+}
+
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
     
@@ -75,6 +98,18 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 
             url = f"https://{domain}"
             logger.info(f"Processing classification request for {domain}")
+
+            # Check if this is a known problematic domain from our cache
+            if domain in PROBLEMATIC_DOMAINS_CACHE:
+                logger.info(f"Using cached response for known problematic domain: {domain}")
+                cached_result = PROBLEMATIC_DOMAINS_CACHE[domain].copy()
+                
+                # Update any dynamic fields
+                if email:
+                    cached_result["email"] = email
+                cached_result["website_url"] = url
+                
+                return jsonify(cached_result), 503  # Service Unavailable
             
             # Check for domain override before any other processing
             domain_override = check_domain_override(domain)
@@ -108,12 +143,20 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 error_result = create_error_result(domain, "dns_error", dns_error, email)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"
+                
+                # Store in cache for future requests
+                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
+                
                 return jsonify(error_result), 503  # Service Unavailable
             elif potentially_flaky:
                 logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
                 error_result = create_error_result(domain, "connection_error", "The website initially responds but shows signs of unstable connections. This may indicate server issues or anti-crawler measures.", email)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"  # Same classification for user consistency
+                
+                # Store in cache for future requests
+                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
+                
                 return jsonify(error_result), 503
             else:
                 logger.info(f"DNS check passed for domain: {domain}")
