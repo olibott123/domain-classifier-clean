@@ -262,6 +262,10 @@ def create_parked_domain_result(domain: str = None, crawler_type: str = None) ->
     """
     domain_name = domain or "This domain"
     
+    # If crawler_type is None, set a default
+    if crawler_type is None:
+        crawler_type = "early_detection"
+    
     return {
         "processing_status": 1,
         "is_service_business": None,
