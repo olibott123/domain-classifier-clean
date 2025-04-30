@@ -204,6 +204,29 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
         logger.error(f"Unexpected error checking domain {domain}: {e}")
         return False, f"Error checking {domain}: {e}", False
 
+def is_domain_worth_crawling(domain: str) -> tuple:
+    """
+    Determines if a domain is worth attempting a full crawl based on preliminary checks.
+    
+    Args:
+        domain (str): The domain to check
+        
+    Returns:
+        tuple: (worth_crawling, has_dns, error_msg, potentially_flaky)
+    """
+    has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
+    
+    # Don't crawl if DNS resolution fails
+    if not has_dns:
+        logger.info(f"Domain {domain} failed DNS check: {error_msg}")
+        return False, has_dns, error_msg, potentially_flaky
+        
+    # Be cautious with potentially flaky domains but still allow crawling
+    if potentially_flaky:
+        logger.warning(f"Domain {domain} may be flaky, proceeding with caution")
+        
+    return True, has_dns, error_msg, potentially_flaky
+
 def create_error_result(domain: str, error_type: Optional[str] = None, 
                         error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -286,6 +309,11 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             explanation = f"We couldn't analyze {domain} because the website took too long to respond. The website may be experiencing performance issues or temporarily unavailable."
             error_result["is_timeout"] = True
             
+        elif error_type == 'is_parked':
+            explanation = f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."
+            error_result["is_parked"] = True
+            error_result["predicted_class"] = "Parked Domain"
+            
         # If we have a specific error detail, use it to enhance the explanation
         if error_detail:
             explanation += f" {error_detail}"
@@ -301,6 +329,8 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
         # Default for DNS errors or connection errors
         if error_type in ["dns_error", "connection_error"]:
             error_result["final_classification"] = "0-NO DNS RESOLUTION"
+        elif error_type == "is_parked":
+            error_result["final_classification"] = "1-PARKED DOMAIN w/o Apollo"
         else:
             error_result["final_classification"] = "4-IT"  # Default fallback
     
