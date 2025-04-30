@@ -28,7 +28,9 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         "domain may be for sale", "this domain is for sale", "parked by",
         "domain parking", "this web page is parked", "website coming soon",
         "under construction", "site not published", "domain for sale",
-        "under development", "this website is for sale", "domain name parking"
+        "under development", "this website is for sale", "domain name parking",
+        "domain owner", "this page is parked", "domain has been registered",
+        "purchase this domain"
     ]
     
     # 2. Add hosting/registrar specific indicators
@@ -37,10 +39,11 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         "domain registration", "web hosting service", "hosting provider",
         "register this domain", "domain broker", "proxy error", "error connecting",
         "domain has expired", "domain has been registered", "courtesy page",
-        "web hosting provider", "get your own domain", "set up website"
+        "web hosting provider", "get your own domain", "set up website",
+        "whois", "register now", "domain name search", "domain name registration"
     ]
     
-    # Check traditional parking phrases
+    # Check traditional parking phrases - these are strong indicators
     for phrase in parking_phrases:
         if phrase in content_lower:
             logger.info(f"Domain contains parking phrase: '{phrase}'")
@@ -48,14 +51,16 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
     
     # Check hosting phrases - more cautious with these
     hosting_matches = 0
+    matched_phrases = []
     for phrase in hosting_phrases:
         if phrase in content_lower:
             hosting_matches += 1
+            matched_phrases.append(phrase)
             logger.info(f"Domain contains hosting/registrar phrase: '{phrase}'")
     
     # If multiple hosting phrases are found, it's likely parked
-    if hosting_matches >= 2:
-        logger.info(f"Domain contains {hosting_matches} hosting/registrar phrases, considering as parked")
+    if hosting_matches >= 1:
+        logger.info(f"Domain contains {hosting_matches} hosting/registrar phrases ({', '.join(matched_phrases)}), considering as parked")
         return True
     
     # 3. Check for proxy errors, which often indicate parked domains
@@ -71,7 +76,7 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
             domain_root = domain.split('.')[0].lower()
             # Count how many times domain name appears
             domain_mentions = content_lower.count(domain_root)
-            if domain_mentions >= 2 and len(content.strip()) < 150:
+            if domain_mentions >= 1 and len(content.strip()) < 150:
                 logger.info(f"Domain name '{domain_root}' appears {domain_mentions} times in minimal content, likely parked")
                 return True
                 
@@ -100,7 +105,7 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         
     # 6. Check for cases similar to your crapanzano.net example
     # Look for "process did not complete" situations with hosting mentions
-    if len(content.strip()) < 300 and any(phrase in content_lower for phrase in ["proxy", "gateway", "error connecting", "godaddy"]):
+    if len(content.strip()) < 300 and any(phrase in content_lower for phrase in ["proxy", "gateway", "error connecting", "godaddy", "domain"]):
         logger.info("Found proxy error or hosting service mentions with minimal content, likely parked")
         return True
         
