@@ -102,7 +102,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         if error_type == "is_parked":
             logger.info(f"Scrapy identified {domain} as a parked domain")
             from domain_classifier.classifiers.decision_tree import create_parked_domain_result
-            return None, (error_type, error_detail), "parked_domain"
+            return None, (error_type, error_detail), "scrapy_parked_domain"
         
         # If Scrapy crawler succeeded, return the content
         if content and len(content.strip()) > 100:
@@ -115,7 +115,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             from domain_classifier.classifiers.decision_tree import is_parked_domain
             if is_parked_domain(content, domain):
                 logger.info(f"Detected parked domain from minimal Scrapy content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "parked_domain"
+                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "scrapy_minimal_parked_domain"
         
         # Log the failure reason
         if error_type:
@@ -132,7 +132,7 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             from domain_classifier.classifiers.decision_tree import is_parked_domain
             if is_parked_domain(content, domain):
                 logger.info(f"Detected parked domain from Apify content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "parked_domain"
+                return None, ("is_parked", "Domain appears to be parked based on content analysis"), "apify_parked_domain"
         
         if content and len(content.strip()) > 100:
             return content, (error_type, error_detail), "apify"
