@@ -45,6 +45,29 @@ PROBLEMATIC_DOMAINS_CACHE = {
     }
 }
 
+def is_domain_worth_crawling(domain: str) -> tuple:
+    """
+    Determines if a domain is worth attempting a full crawl based on preliminary checks.
+    
+    Args:
+        domain (str): The domain to check
+        
+    Returns:
+        tuple: (worth_crawling, has_dns, error_msg, potentially_flaky)
+    """
+    has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
+    
+    # Don't crawl if DNS resolution fails
+    if not has_dns:
+        logger.info(f"Domain {domain} failed DNS check: {error_msg}")
+        return False, has_dns, error_msg, potentially_flaky
+        
+    # Be cautious with potentially flaky domains but still allow crawling
+    if potentially_flaky:
+        logger.warning(f"Domain {domain} may be flaky, proceeding with caution")
+        
+    return True, has_dns, error_msg, potentially_flaky
+
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
     
@@ -136,11 +159,11 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 logger.info(f"Sending override response to client: {domain_override}")
                 return jsonify(domain_override), 200
             
-            # DNS check - critical for performance and avoiding unnecessary crawling
-            logger.info(f"Performing DNS check for domain: {domain}")
-            has_dns, dns_error, potentially_flaky = check_domain_dns(domain)
-            if not has_dns:
-                logger.warning(f"DNS check failed for domain {domain}: {dns_error}")
+            # Enhanced domain screening before attempting crawl
+            worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
+            
+            if not worth_crawling:
+                logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
                 error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", dns_error, email)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "0-NO DNS RESOLUTION"
@@ -151,14 +174,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 return jsonify(error_result), 503  # Service Unavailable
             elif potentially_flaky:
                 logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
-                error_result = create_error_result(domain, "connection_error", "The website initially responds but shows signs of unstable connections. This may indicate server issues or anti-crawler measures.", email)
-                error_result["website_url"] = url
-                error_result["final_classification"] = "0-NO DNS RESOLUTION"  # Same classification for user consistency
-                
-                # Store in cache for future requests
-                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
-                
-                return jsonify(error_result), 503
+                # We'll still try to crawl, but warn the user that it might be unreliable
             else:
                 logger.info(f"DNS check passed for domain: {domain}")
             
@@ -357,7 +373,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             }
             
             # Forward to classify_domain by calling it directly with the new data
-            # This is slightly different from the original approach to avoid monkey patching
             from flask import request as flask_request
             
             # Store the original json
