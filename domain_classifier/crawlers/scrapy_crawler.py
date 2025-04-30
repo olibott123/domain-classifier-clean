@@ -66,10 +66,26 @@ class ScrapyCrawler:
                     body_texts = response.xpath('//body//text()[string-length(normalize-space()) > 5]').getall()
                     paragraphs.extend(body_texts)
                 
+                # Method 5: Get title and meta description for very minimal content
+                if len(' '.join(paragraphs)) < 50:
+                    title = response.xpath('//title/text()').get()
+                    if title:
+                        paragraphs.append(title)
+                    meta_desc = response.xpath('//meta[@name="description"]/@content').get()
+                    if meta_desc:
+                        paragraphs.append(meta_desc)
+                
                 # Clean up the text
                 paragraphs = [p.strip() for p in paragraphs if p and p.strip()]
                 
-                yield {'url': response.url, 'paragraphs': paragraphs}
+                # Add raw HTML as a fallback for parked domain detection
+                raw_html = response.body.decode('utf-8', errors='ignore')
+                
+                yield {
+                    'url': response.url, 
+                    'paragraphs': paragraphs,
+                    'raw_html': raw_html
+                }
                 
                 # Only follow a few links from homepage to avoid wasting resources
                 if response.url == self.start_urls[0]:
@@ -96,6 +112,18 @@ class ScrapyCrawler:
                 for item in self.results
                 for paragraph in item.get('paragraphs', [])
             )
+            
+            # If text is minimal or empty, check the raw HTML for parked domain indicators
+            if not text or len(text.strip()) < 100:
+                raw_html = ""
+                for item in self.results:
+                    if item.get('raw_html'):
+                        raw_html += item.get('raw_html')
+                
+                # If we have raw HTML, return it for parked domain detection
+                if raw_html:
+                    return raw_html
+            
             return text
         except Exception as e:
             logger.error(f"Error in Scrapy crawler: {e}")
@@ -127,6 +155,27 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
         crawler = ScrapyCrawler()
         content = crawler.scrape(url)
         
+        # Return is_parked even with minimal or empty content
+        if not content or len(content.strip()) < 100:
+            logger.warning(f"Scrapy crawl returned minimal or no content for {domain}")
+            # Still try to check if it's a parked domain, even with minimal content
+            from domain_classifier.crawlers.direct_crawler import direct_crawl
+            
+            try:
+                # Try a direct crawl as backup to check for parked domain
+                direct_content, _, _ = direct_crawl(url, timeout=5.0)
+                
+                # Check the direct content for parked domain indicators
+                if direct_content:
+                    from domain_classifier.classifiers.decision_tree import is_parked_domain
+                    if is_parked_domain(direct_content, domain):
+                        logger.info(f"Detected parked domain from direct content: {domain}")
+                        return None, ("is_parked", "Domain appears to be parked based on content analysis")
+            except Exception as direct_err:
+                logger.warning(f"Direct crawl failed for parked check: {direct_err}")
+            
+            return None, ("minimal_content", "Website returned minimal or no content")
+                
         # Check for parked domain indicators in content before proceeding
         if content:
             from domain_classifier.classifiers.decision_tree import is_parked_domain
@@ -137,7 +186,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             # Check for proxy errors or hosting provider mentions that indicate parked domains
             if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
                                                ["proxy error", "error connecting", "godaddy", 
-                                                "domain registration", "hosting provider"]):
+                                                "domain registration", "hosting provider", "buy this domain"]):
                 logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
                 return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
