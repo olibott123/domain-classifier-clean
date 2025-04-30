@@ -322,12 +322,13 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Process the fresh classification result
             result = process_fresh_result(classification, domain, email, url)
 
-            # Add crawler_type to the result
-            if crawler_type:
+            # Add crawler_type to the result if not already included
+            if crawler_type and "crawler_type" not in result:
                 result["crawler_type"] = crawler_type
                 
-            # Add classifier_type to the result
-            result["classifier_type"] = classifier_type
+            # Add classifier_type to the result if not already included
+            if classifier_type and "classifier_type" not in result:
+                result["classifier_type"] = classifier_type
 
             # Ensure result consistency
             result = validate_result_consistency(result, domain)
