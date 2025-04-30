@@ -8,12 +8,13 @@ from typing import Tuple, Optional
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
+def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Directly crawl a website using a simple GET request as a fallback method.
     
     Args:
         url (str): The URL to crawl
+        timeout (float): Timeout for the request in seconds
         
     Returns:
         tuple: (content, (error_type, error_detail), crawler_type)
@@ -23,7 +24,7 @@ def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             - crawler_type: Always "direct" if successful
     """
     try:
-        logger.info(f"Attempting direct crawl for {url}")
+        logger.info(f"Attempting direct crawl for {url} with timeout {timeout}s")
         
         # Ensure URL is properly formatted
         if not url.startswith('http'):
@@ -38,14 +39,33 @@ def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             'Pragma': 'no-cache'
         }
         
-        # Make the request with a reasonable timeout
-        response = requests.get(url, headers=headers, timeout=15)
+        # Parse the domain for parked domain checking later
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # Make the request with specified timeout
+        response = requests.get(url, headers=headers, timeout=timeout, stream=True)
         response.raise_for_status()  # Raise exception for 4XX/5XX status codes
         
         # Get content type
         content_type = response.headers.get('Content-Type', '').lower()
         
-        # Handle different content types
+        # For quick parked domain checks, just get the first chunk
+        if timeout < 10:
+            content = next(response.iter_content(4096), None)
+            if content:
+                text = content.decode('utf-8', errors='ignore')
+                
+                # Check immediately for parked domain indicators
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                if is_parked_domain(text, domain):
+                    logger.info(f"Direct crawl detected a parked domain: {domain}")
+                    return text, (None, None), "direct_parked_detection"
+                    
+                return text, (None, None), "direct_quick"
+        
+        # Handle different content types for full crawling
         if 'text/html' in content_type or 'text/plain' in content_type or 'application/xhtml' in content_type:
             # Extract readable text by removing HTML tags
             html_content = response.text
@@ -53,6 +73,12 @@ def direct_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             clean_text = re.sub(r'<style.*?>.*?</style>', ' ', clean_text, flags=re.DOTALL)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
             clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            
+            # Check for parked domain indicators
+            from domain_classifier.classifiers.decision_tree import is_parked_domain
+            if is_parked_domain(html_content, domain):
+                logger.info(f"Direct crawl identified {domain} as a parked domain")
+                return html_content, (None, None), "direct_parked_detection"
             
             if clean_text and len(clean_text) > 100:
                 logger.info(f"Direct crawl successful, got {len(clean_text)} characters")
