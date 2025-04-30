@@ -65,6 +65,76 @@ def detect_error_type(error_message: str) -> Tuple[str, str]:
     # Default fallback
     return "unknown_error", "An unknown error occurred while trying to access the website."
 
+def quick_parked_check(url: str) -> Tuple[bool, Optional[str]]:
+    """
+    Perform a quick check to see if a domain is likely parked.
+    
+    Args:
+        url (str): The URL to check
+        
+    Returns:
+        tuple: (is_parked, content)
+            - is_parked: Whether domain is parked
+            - content: Any content retrieved during check
+    """
+    try:
+        # Parse domain for checking
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+            
+        # Try quick direct request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache'
+        }
+        
+        # Set a low timeout to fail quickly
+        response = requests.get(url, headers=headers, timeout=5.0, stream=True)
+        
+        # Get a chunk of content
+        content = next(response.iter_content(2048), None)
+        if content:
+            content_str = content.decode('utf-8', errors='ignore')
+            
+            # Check for common parked domain indicators in this small chunk
+            parked_indicators = [
+                "domain is for sale", "buy this domain", "domain parking", 
+                "parked by", "godaddy", "domain registration", "hosting provider"
+            ]
+            
+            if any(indicator in content_str.lower() for indicator in parked_indicators):
+                logger.info(f"Quick check found parked domain indicators for {domain}")
+                return True, content_str
+                
+            # If not immediately obvious from first chunk, get more content
+            full_content = content_str
+            try:
+                # Get up to 10KB more
+                for _ in range(5):
+                    chunk = next(response.iter_content(2048), None)
+                    if not chunk:
+                        break
+                    full_content += chunk.decode('utf-8', errors='ignore')
+                
+                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                if is_parked_domain(full_content, domain):
+                    logger.info(f"Quick check determined {domain} is a parked domain")
+                    return True, full_content
+            except Exception as e:
+                logger.warning(f"Error in additional content check: {e}")
+                
+            return False, full_content
+            
+        return False, None
+        
+    except Exception as e:
+        logger.warning(f"Quick parked domain check failed: {e}")
+        return False, None
+
 def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]], Optional[str]]:
     """
     Crawl a website using Scrapy first, then falling back to Apify if needed.
@@ -94,6 +164,12 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             logger.warning(f"Domain {domain} does not resolve - DNS error")
             return None, ("dns_error", "This domain does not exist or cannot be resolved"), None
         
+        # Perform a quick check for parked domains before full crawl
+        is_parked, quick_content = quick_parked_check(url)
+        if is_parked:
+            logger.info(f"Quick check identified {domain} as a parked domain")
+            return None, ("is_parked", "Domain appears to be parked based on quick check"), "quick_check_parked"
+        
         # First try Scrapy crawler
         logger.info(f"Attempting crawl with Scrapy for {url}")
         content, (error_type, error_detail) = scrapy_crawl(url)
@@ -101,7 +177,6 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
         # Special handling for parked domains identified during Scrapy crawl
         if error_type == "is_parked":
             logger.info(f"Scrapy identified {domain} as a parked domain")
-            from domain_classifier.classifiers.decision_tree import create_parked_domain_result
             return None, (error_type, error_detail), "scrapy_parked_domain"
         
         # If Scrapy crawler succeeded, return the content
@@ -109,13 +184,17 @@ def crawl_website(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optiona
             logger.info(f"Scrapy crawl successful for {url}")
             return content, (None, None), "scrapy"
             
-        # Check if we got any content at all that might indicate a parked domain
-        if content and len(content.strip()) > 0:
+        # For minimal content with Scrapy, try one more parked domain check
+        if content and len(content.strip()) <= 100:
             # Check for parked domain indicators in minimal content
             from domain_classifier.classifiers.decision_tree import is_parked_domain
             if is_parked_domain(content, domain):
                 logger.info(f"Detected parked domain from minimal Scrapy content: {domain}")
                 return None, ("is_parked", "Domain appears to be parked based on content analysis"), "scrapy_minimal_parked_domain"
+            
+            # If it's minimal but not parked, return it with a special crawler type
+            logger.warning(f"Scrapy returned minimal but useful content: {len(content.strip())} characters")
+            return content, (None, None), "scrapy_minimal"
         
         # Log the failure reason
         if error_type:
