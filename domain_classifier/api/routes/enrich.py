@@ -59,7 +59,7 @@ def register_enrich_routes(app, snowflake_conn):
                 
                 # Add final classification if not present
                 if "final_classification" not in cached_result:
-                    cached_result["final_classification"] = "0-NO DNS RESOLUTION"
+                    cached_result["final_classification"] = "7-No Website available"
                     
                 return jsonify(cached_result), 503  # Service Unavailable
             
@@ -153,10 +153,10 @@ def register_enrich_routes(app, snowflake_conn):
                 classification_result['crawler_type'] = crawler_type
                 
             # Update final_classification based on Apollo data
-            # For parked domains, check if we need to update from 1-PARKED DOMAIN w/o Apollo to 2-PARKED DOMAIN w Apollo
-            if classification_result.get('final_classification') == "1-PARKED DOMAIN w/o Apollo" and company_data:
-                classification_result['final_classification'] = "2-PARKED DOMAIN w Apollo"
-                logger.info(f"Updated final classification to 2-PARKED DOMAIN w Apollo for {domain}")
+            # For parked domains, check if we need to update from 6-Parked Domain - no enrichment to 5-Parked Domain with partial enrichment
+            if classification_result.get('final_classification') == "6-Parked Domain - no enrichment" and company_data:
+                classification_result['final_classification'] = "5-Parked Domain with partial enrichment"
+                logger.info(f"Updated final classification to 5-Parked Domain with partial enrichment for {domain}")
             elif "final_classification" not in classification_result:
                 # Ensure final_classification is set
                 classification_result["final_classification"] = determine_final_classification(classification_result)
@@ -187,8 +187,13 @@ def register_enrich_routes(app, snowflake_conn):
             # Try to identify the error type
             error_type, error_detail = detect_error_type(str(e))
             # Create an error response
-            error_result = create_error_result(domain if 'domain' in locals() else "unknown", 
-                                             error_type, error_detail)
+            error_result = create_error_result(
+                domain if 'domain' in locals() else "unknown", 
+                error_type, 
+                error_detail,
+                email if 'email' in locals() else None,
+                "enrich_error_handler"  # Set a crawler_type for enrichment errors
+            )
             error_result["error"] = str(e)  # Add the actual error message
             
             # Ensure final_classification is set for error results
