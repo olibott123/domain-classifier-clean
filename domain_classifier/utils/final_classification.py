@@ -23,8 +23,8 @@ def determine_final_classification(result: Dict[str, Any]) -> str:
     
     # Check for DNS resolution errors first
     if result.get("error_type") == "dns_error" or (isinstance(result.get("explanation", ""), str) and "DNS" in result.get("explanation", "")):
-        logger.info(f"Classifying as NO DNS RESOLUTION due to error_type={result.get('error_type')}")
-        return "0-NO DNS RESOLUTION"
+        logger.info(f"Classifying as No Website available due to error_type={result.get('error_type')}")
+        return "7-No Website available"
         
     # Check for parked domains
     if result.get("is_parked", False) or result.get("predicted_class") == "Parked Domain":
@@ -32,23 +32,23 @@ def determine_final_classification(result: Dict[str, Any]) -> str:
         has_apollo = bool(result.get("apollo_data") and any(result["apollo_data"].values()))
         logger.info(f"Domain is parked. Has Apollo data: {has_apollo}")
         if has_apollo:
-            return "2-PARKED DOMAIN w Apollo"
+            return "5-Parked Domain with partial enrichment"
         else:
-            return "1-PARKED DOMAIN w/o Apollo"
+            return "6-Parked Domain - no enrichment"
     
     # Check for service business types
     predicted_class = result.get("predicted_class", "")
     logger.info(f"Checking service business type: {predicted_class}")
     
     if predicted_class == "Managed Service Provider":
-        return "3-MSP"
+        return "1-MSP"
     elif predicted_class == "Internal IT Department":
-        return "4-IT"
+        return "2-Internal IT"
     elif predicted_class == "Integrator - Commercial A/V":
-        return "5-Commercial Integrator"
+        return "3-Commercial Integrator"
     elif predicted_class == "Integrator - Residential A/V":
-        return "6-Residential Integrator"
+        return "4-Residential Integrator"
     
     # Default for unknown or error cases
-    logger.info(f"No specific classification matched, defaulting to 4-IT")
-    return "4-IT"  # Default to IT if we can't determine
+    logger.info(f"No specific classification matched, defaulting to 2-Internal IT")
+    return "2-Internal IT"  # Default to Internal IT if we can't determine
