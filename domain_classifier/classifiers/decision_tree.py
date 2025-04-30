@@ -249,12 +249,13 @@ def create_process_did_not_complete_result(domain: str = None) -> Dict[str, Any]
         "max_confidence": 0.0
     }
 
-def create_parked_domain_result(domain: str = None) -> Dict[str, Any]:
+def create_parked_domain_result(domain: str = None, crawler_type: str = None) -> Dict[str, Any]:
     """
     Create a standardized result for parked domains.
     
     Args:
         domain: The domain name
+        crawler_type: The type of crawler that detected the parked domain
         
     Returns:
         dict: Standardized parked domain result
@@ -277,5 +278,6 @@ def create_parked_domain_result(domain: str = None) -> Dict[str, Any]:
         "detection_method": "parked_domain_detection",
         "low_confidence": True,
         "is_parked": True,
-        "max_confidence": 0.0
+        "max_confidence": 0.0,
+        "crawler_type": crawler_type  # Add crawler_type to the result
     }
