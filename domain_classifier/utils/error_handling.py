@@ -115,6 +115,13 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                     try:
                         chunk = next(response.iter_content(1024), None)
                         if chunk:
+                            # Quick check for parked domain in this first chunk
+                            from domain_classifier.classifiers.decision_tree import is_parked_domain
+                            chunk_text = chunk.decode('utf-8', errors='ignore')
+                            if is_parked_domain(chunk_text, clean_domain):
+                                logger.info(f"Domain {clean_domain} appears to be a parked domain based on initial content")
+                                return True, "parked_domain", False
+                                
                             success = True
                             logger.info(f"Successfully read content chunk from {clean_domain}")
                         else:
@@ -152,6 +159,13 @@ def check_domain_dns(domain: str) -> Tuple[bool, Optional[str], bool]:
                         try:
                             chunk = next(response.iter_content(1024), None)
                             if chunk:
+                                # Quick check for parked domain in this first chunk
+                                from domain_classifier.classifiers.decision_tree import is_parked_domain
+                                chunk_text = chunk.decode('utf-8', errors='ignore')
+                                if is_parked_domain(chunk_text, clean_domain):
+                                    logger.info(f"Domain {clean_domain} appears to be a parked domain based on HTTP content")
+                                    return True, "parked_domain", False
+                                    
                                 success = True
                                 logger.info(f"Successfully read content chunk from {clean_domain} (HTTP)")
                             else:
@@ -216,9 +230,9 @@ def is_domain_worth_crawling(domain: str) -> tuple:
     """
     has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
     
-    # Don't crawl if DNS resolution fails
-    if not has_dns:
-        logger.info(f"Domain {domain} failed DNS check: {error_msg}")
+    # Don't crawl if DNS resolution fails or if it's a parked domain
+    if not has_dns or error_msg == "parked_domain":
+        logger.info(f"Domain {domain} failed check: {error_msg}")
         return False, has_dns, error_msg, potentially_flaky
         
     # Be cautious with potentially flaky domains but still allow crawling
@@ -311,7 +325,7 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
             explanation = f"We couldn't analyze {domain} because the website took too long to respond. The website may be experiencing performance issues or temporarily unavailable."
             error_result["is_timeout"] = True
             
-        elif error_type == 'is_parked':
+        elif error_type == 'is_parked' or error_type == 'parked_domain':
             explanation = f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."
             error_result["is_parked"] = True
             error_result["predicted_class"] = "Parked Domain"
@@ -325,6 +339,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
     # Add crawler_type if provided
     error_result["crawler_type"] = crawler_type or "error_handler"  # Set a default
     
+    # Add classifier_type
+    error_result["classifier_type"] = "early_detection" if error_type in ["is_parked", "parked_domain"] else "error_handler"
+    
     # Add final classification if possible
     if HAS_FINAL_CLASSIFICATION:
         # Import here to avoid circular imports
@@ -334,7 +351,7 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
         # Default for DNS errors or connection errors
         if error_type in ["dns_error", "connection_error"]:
             error_result["final_classification"] = "7-No Website available"
-        elif error_type == "is_parked":
+        elif error_type in ["is_parked", "parked_domain"]:
             error_result["final_classification"] = "6-Parked Domain - no enrichment"
         else:
             error_result["final_classification"] = "2-Internal IT"  # Default fallback
