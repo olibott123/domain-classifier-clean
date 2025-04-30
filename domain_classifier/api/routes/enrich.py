@@ -4,12 +4,10 @@ import traceback
 from flask import request, jsonify, current_app
 
 # Import utilities
-from domain_classifier.utils.error_handling import detect_error_type, create_error_result
+from domain_classifier.utils.error_handling import detect_error_type, create_error_result, is_domain_worth_crawling
 from domain_classifier.storage.operations import save_to_snowflake
 from domain_classifier.utils.final_classification import determine_final_classification
-
-# Import problematic domains cache
-from domain_classifier.api.routes.classify import PROBLEMATIC_DOMAINS_CACHE
+from domain_classifier.classifiers.decision_tree import create_parked_domain_result, is_parked_domain
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -35,7 +33,7 @@ def register_enrich_routes(app, snowflake_conn):
             is_email = '@' in input_value
             email = input_value if is_email else None
             
-            # Extract domain for checking cache
+            # Extract domain for checking
             domain = None
             if is_email and '@' in input_value:
                 domain = input_value.split('@')[-1].strip().lower()
@@ -46,22 +44,71 @@ def register_enrich_routes(app, snowflake_conn):
                     domain = domain.split('/', 1)[0]
                 if domain.startswith('www.'):
                     domain = domain[4:]
-                
-            # Check if this is a known problematic domain before proceeding
-            if domain and domain in PROBLEMATIC_DOMAINS_CACHE:
-                logger.info(f"Using cached response for known problematic domain in enrich: {domain}")
-                cached_result = PROBLEMATIC_DOMAINS_CACHE[domain].copy()
-                
-                # Update any dynamic fields
-                if email:
-                    cached_result["email"] = email
-                cached_result["website_url"] = f"https://{domain}"
-                
-                # Add final classification if not present
-                if "final_classification" not in cached_result:
-                    cached_result["final_classification"] = "7-No Website available"
                     
-                return jsonify(cached_result), 503  # Service Unavailable
+            # Create URL for checks and displaying
+            url = f"https://{domain}"
+                
+            # Direct check if domain is worth crawling or is parked
+            worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
+            if not worth_crawling:
+                logger.info(f"Domain {domain} cannot be enriched: {dns_error}")
+                # Create an error result
+                error_result = create_error_result(
+                    domain,
+                    "dns_error" if "DNS" in dns_error else "connection_error",
+                    dns_error,
+                    email,
+                    "early_check"
+                )
+                error_result["website_url"] = url
+                
+                # Set appropriate final_classification
+                if dns_error == "parked_domain":
+                    error_result["final_classification"] = "6-Parked Domain - no enrichment"
+                else:
+                    error_result["final_classification"] = "7-No Website available"
+                    
+                return jsonify(error_result), 503
+            
+            # Check for early parked domain detection
+            try:
+                from domain_classifier.crawlers.direct_crawler import direct_crawl
+                logger.info(f"Performing quick check for parked domain before enriching: {domain}")
+                quick_check_content, (error_type, error_detail), quick_crawler_type = direct_crawl(url, timeout=5.0)
+                
+                # Check if this is a parked domain
+                if error_type == "is_parked" or (quick_check_content and is_parked_domain(quick_check_content, domain)):
+                    logger.info(f"Quick check detected parked domain: {domain}")
+                    parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
+                    
+                    # Process the parked domain result
+                    result = {
+                        "domain": domain,
+                        "predicted_class": "Parked Domain",
+                        "confidence_score": 0,
+                        "confidence_scores": {
+                            "Managed Service Provider": 0,
+                            "Integrator - Commercial A/V": 0,
+                            "Integrator - Residential A/V": 0,
+                            "Internal IT Department": 0
+                        },
+                        "explanation": parked_result.get("llm_explanation", f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."),
+                        "low_confidence": True,
+                        "is_parked": True,
+                        "final_classification": "6-Parked Domain - no enrichment",
+                        "crawler_type": "quick_check_parked",
+                        "classifier_type": "early_detection",
+                        "detection_method": "parked_domain_detection",
+                        "source": "fresh"
+                    }
+                    
+                    if email:
+                        result["email"] = email
+                    result["website_url"] = url
+                    
+                    return jsonify(result), 200
+            except Exception as e:
+                logger.warning(f"Early parked domain check failed in enrichment route: {e}")
             
             # First perform standard classification by making an internal request
             # We'll use the routes directly from the app, rather than importing functions
