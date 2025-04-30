@@ -355,8 +355,13 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     
                 return jsonify(error_result), 500
             
+            # Add crawler_type to the classification if available
+            if crawler_type:
+                classification["crawler_type"] = crawler_type
+            
             # Determine classifier type
             classifier_type = "claude-llm" if classification else None
+            classification["classifier_type"] = classifier_type
             
             # Save to Snowflake and Vector DB (always save, even for reclassifications)
             save_to_snowflake(
