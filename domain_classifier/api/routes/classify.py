@@ -3,10 +3,11 @@ import logging
 import traceback
 from flask import request, jsonify
 from urllib.parse import urlparse
+from typing import Dict, Any, Tuple, Optional
 
 # Import domain utilities
 from domain_classifier.utils.domain_utils import extract_domain_from_email
-from domain_classifier.utils.error_handling import detect_error_type, create_error_result, check_domain_dns
+from domain_classifier.utils.error_handling import detect_error_type, create_error_result, check_domain_dns, is_domain_worth_crawling
 
 # Import configuration
 from domain_classifier.config.overrides import check_domain_override
@@ -18,57 +19,64 @@ from domain_classifier.classifiers.result_validator import validate_result_consi
 from domain_classifier.storage.cache_manager import process_cached_result
 from domain_classifier.utils.text_processing import extract_company_description
 from domain_classifier.storage.result_processor import process_fresh_result
+from domain_classifier.classifiers.decision_tree import is_parked_domain, create_parked_domain_result
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Create the problematic domains cache for compatibility with enrich.py
-PROBLEMATIC_DOMAINS_CACHE = {
-    "crapanzano.it": {
-        "domain": "crapanzano.it",
-        "error": "Known problematic domain",
-        "predicted_class": "Unknown",
-        "confidence_score": 0,
-        "confidence_scores": {
-            "Managed Service Provider": 0,
-            "Integrator - Commercial A/V": 0,
-            "Integrator - Residential A/V": 0,
-            "Internal IT Department": 0
-        },
-        "explanation": "This domain is known to have connection issues that prevent reliable crawling. The website initially responds but shows signs of unstable connections.",
-        "low_confidence": True,
-        "is_crawl_error": True,
-        "error_type": "connection_error",
-        "is_connection_error": True,
-        "final_classification": "7-No Website available",
-        "source": "cached_problematic_domain",
-        "crawler_type": "error_handler",
-        "classifier_type": "error_handler"
-    }
-}
-
-def is_domain_worth_crawling(domain: str) -> tuple:
+def check_for_parked_domain(domain: str, url: str) -> Tuple[bool, Dict[str, Any]]:
     """
-    Determines if a domain is worth attempting a full crawl based on preliminary checks.
+    Perform a quick check to determine if a domain is parked before full crawling.
     
     Args:
-        domain (str): The domain to check
+        domain (str): The domain name
+        url (str): The full URL
         
     Returns:
-        tuple: (worth_crawling, has_dns, error_msg, potentially_flaky)
+        tuple: (is_parked, result)
+            - is_parked: Whether the domain is parked
+            - result: The result dict if parked, None otherwise
     """
-    has_dns, error_msg, potentially_flaky = check_domain_dns(domain)
+    try:
+        from domain_classifier.crawlers.direct_crawler import direct_crawl
+        from domain_classifier.classifiers.decision_tree import is_parked_domain, create_parked_domain_result
+        
+        logger.info(f"Performing quick check for parked domain: {domain}")
+        quick_check_content, (error_type, error_detail), quick_crawler_type = direct_crawl(url, timeout=5.0)
+        
+        # Check if this is a parked domain
+        if error_type == "is_parked" or (quick_check_content and is_parked_domain(quick_check_content, domain)):
+            logger.info(f"Quick check detected parked domain: {domain}")
+            parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
+            
+            # Process the result from the decision tree
+            result = {
+                "domain": domain,
+                "predicted_class": "Parked Domain",
+                "confidence_score": 0,
+                "confidence_scores": {
+                    "Managed Service Provider": 0,
+                    "Integrator - Commercial A/V": 0,
+                    "Integrator - Residential A/V": 0,
+                    "Internal IT Department": 0
+                },
+                "explanation": parked_result.get("llm_explanation", f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."),
+                "low_confidence": True,
+                "is_parked": True,
+                "final_classification": "6-Parked Domain - no enrichment",
+                "crawler_type": "quick_check_parked",
+                "classifier_type": "early_detection",
+                "detection_method": "parked_domain_detection",
+                "source": "fresh"
+            }
+            
+            return True, result
+            
+        return False, None
     
-    # Don't crawl if DNS resolution fails
-    if not has_dns:
-        logger.info(f"Domain {domain} failed DNS check: {error_msg}")
-        return False, has_dns, error_msg, potentially_flaky
-        
-    # Be cautious with potentially flaky domains but still allow crawling
-    if potentially_flaky:
-        logger.warning(f"Domain {domain} may be flaky, proceeding with caution")
-        
-    return True, has_dns, error_msg, potentially_flaky
+    except Exception as e:
+        logger.warning(f"Early parked domain check failed: {e}")
+        return False, None
 
 def register_classify_routes(app, llm_classifier, snowflake_conn):
     """Register domain/email classification related routes."""
@@ -124,18 +132,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 
             url = f"https://{domain}"
             logger.info(f"Processing classification request for {domain}")
-
-            # Check if this is a known problematic domain from our cache
-            if domain in PROBLEMATIC_DOMAINS_CACHE:
-                logger.info(f"Using cached response for known problematic domain: {domain}")
-                cached_result = PROBLEMATIC_DOMAINS_CACHE[domain].copy()
-                
-                # Update any dynamic fields
-                if email:
-                    cached_result["email"] = email
-                cached_result["website_url"] = url
-                
-                return jsonify(cached_result), 503  # Service Unavailable
             
             # Check for domain override before any other processing
             domain_override = check_domain_override(domain)
@@ -171,18 +167,42 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Initialize crawler_type
             crawler_type = None
             
+            # Check for parked domain early
+            if dns_error == "parked_domain":
+                logger.info(f"Domain {domain} detected as parked domain during initial DNS check")
+                parked_result = create_parked_domain_result(domain, crawler_type="dns_check_parked")
+                result = process_fresh_result(parked_result, domain, email, url)
+                result["crawler_type"] = "dns_check_parked"
+                result["classifier_type"] = "early_detection"
+                return jsonify(result), 200
+            
             if not worth_crawling:
                 logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
                 error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", 
                                                  dns_error, email, crawler_type)
                 error_result["website_url"] = url
                 error_result["final_classification"] = "7-No Website available"
-                
-                # Store in cache for future requests
-                PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
-                
                 return jsonify(error_result), 503  # Service Unavailable
-            elif potentially_flaky:
+            
+            # If domain is worth crawling, do an additional early check for parked domains
+            if worth_crawling:
+                # Add early parked domain detection
+                is_parked, parked_result = check_for_parked_domain(domain, url)
+                if is_parked:
+                    # Create result for the API
+                    from domain_classifier.classifiers.decision_tree import create_parked_domain_result
+                    parked_domain_data = create_parked_domain_result(domain, crawler_type="quick_check_parked")
+                    
+                    # Process the result
+                    result = process_fresh_result(parked_domain_data, domain, email, url)
+                    
+                    # Add to final result
+                    result["crawler_type"] = "quick_check_parked"  
+                    result["classifier_type"] = "early_detection"
+                    
+                    return jsonify(result), 200
+            
+            if potentially_flaky:
                 logger.warning(f"Domain {domain} passed basic checks but shows signs of being flaky (resetting connections)")
                 # We'll still try to crawl, but warn the user that it might be unreliable
             else:
@@ -217,6 +237,22 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                         logger.info(f"Using existing content for {domain}")
                         # Set crawler_type for existing content
                         crawler_type = "existing_content"
+                        
+                        # Add check for parked domain in cached content
+                        from domain_classifier.classifiers.decision_tree import is_parked_domain
+                        if is_parked_domain(content, domain):
+                            logger.info(f"Detected parked domain from cached content: {domain}")
+                            from domain_classifier.classifiers.decision_tree import create_parked_domain_result
+                            parked_result = create_parked_domain_result(domain, crawler_type="cached_content_parked")
+                            
+                            # Process the parked domain result
+                            result = process_fresh_result(parked_result, domain, email, url)
+                            
+                            # Add crawler_type and classifier_type to ensure they appear at the bottom
+                            result["crawler_type"] = "cached_content_parked"
+                            result["classifier_type"] = "early_detection"
+                            
+                            return jsonify(result), 200
                 except Exception as e:
                     logger.warning(f"Could not get existing content, will crawl instead: {e}")
                     content = None
@@ -260,9 +296,6 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 if not content:
                     error_result = create_error_result(domain, error_type, error_detail, email, crawler_type)
                     error_result["website_url"] = url
-                    
-                    # Add to problematic domains cache
-                    PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
                     
                     return jsonify(error_result), 503  # Service Unavailable
             
