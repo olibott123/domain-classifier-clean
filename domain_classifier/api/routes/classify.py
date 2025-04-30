@@ -40,8 +40,10 @@ PROBLEMATIC_DOMAINS_CACHE = {
         "is_crawl_error": True,
         "error_type": "connection_error",
         "is_connection_error": True,
-        "final_classification": "0-NO DNS RESOLUTION",
-        "source": "cached_problematic_domain"
+        "final_classification": "7-No Website available",
+        "source": "cached_problematic_domain",
+        "crawler_type": "error_handler",
+        "classifier_type": "error_handler"
     }
 }
 
@@ -147,13 +149,17 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                 
                 # Add final classification based on predicted class
                 if domain_override.get("predicted_class") == "Managed Service Provider":
-                    domain_override["final_classification"] = "3-MSP"
+                    domain_override["final_classification"] = "1-MSP"
                 elif domain_override.get("predicted_class") == "Integrator - Commercial A/V":
-                    domain_override["final_classification"] = "5-Commercial Integrator"
+                    domain_override["final_classification"] = "3-Commercial Integrator"
                 elif domain_override.get("predicted_class") == "Integrator - Residential A/V":
-                    domain_override["final_classification"] = "6-Residential Integrator"
+                    domain_override["final_classification"] = "4-Residential Integrator"
                 else:
-                    domain_override["final_classification"] = "4-IT"
+                    domain_override["final_classification"] = "2-Internal IT"
+                
+                # Add crawler_type and classifier_type to ensure they appear at the bottom
+                domain_override["crawler_type"] = "override"
+                domain_override["classifier_type"] = "override"
                 
                 # Return the override directly
                 logger.info(f"Sending override response to client: {domain_override}")
@@ -162,11 +168,15 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # Enhanced domain screening before attempting crawl
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
             
+            # Initialize crawler_type
+            crawler_type = None
+            
             if not worth_crawling:
                 logger.warning(f"Domain {domain} is not worth crawling: {dns_error}")
-                error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", dns_error, email)
+                error_result = create_error_result(domain, "dns_error" if "DNS" in dns_error else "connection_error", 
+                                                 dns_error, email, crawler_type)
                 error_result["website_url"] = url
-                error_result["final_classification"] = "0-NO DNS RESOLUTION"
+                error_result["final_classification"] = "7-No Website available"
                 
                 # Store in cache for future requests
                 PROBLEMATIC_DOMAINS_CACHE[domain] = error_result.copy()
@@ -205,6 +215,8 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     content = snowflake_conn.get_domain_content(domain)
                     if content:
                         logger.info(f"Using existing content for {domain}")
+                        # Set crawler_type for existing content
+                        crawler_type = "existing_content"
                 except Exception as e:
                     logger.warning(f"Could not get existing content, will crawl instead: {e}")
                     content = None
@@ -226,7 +238,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     "low_confidence": True,
                     "no_existing_content": True,
                     "website_url": url,
-                    "final_classification": "4-IT"
+                    "final_classification": "2-Internal IT",
+                    "crawler_type": "error_handler",
+                    "classifier_type": "error_handler"
                 }
                 
                 # Add email to response if input was an email
@@ -238,14 +252,13 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             # If no content yet and we're not using existing content, crawl the website
             error_type = None
             error_detail = None
-            crawler_type = None
             
             if not content and not use_existing_content:
                 logger.info(f"Crawling website for {domain}")
                 content, (error_type, error_detail), crawler_type = crawl_website(url)
                 
                 if not content:
-                    error_result = create_error_result(domain, error_type, error_detail, email)
+                    error_result = create_error_result(domain, error_type, error_detail, email, crawler_type)
                     error_result["website_url"] = url
                     
                     # Add to problematic domains cache
@@ -269,7 +282,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     "explanation": "Our classification system is temporarily unavailable. Please try again later.",
                     "low_confidence": True,
                     "website_url": url,
-                    "final_classification": "4-IT"
+                    "final_classification": "2-Internal IT",
+                    "crawler_type": crawler_type or "error_handler",
+                    "classifier_type": "error_handler"
                 }
                 
                 # Add email to error response if input was an email
@@ -296,7 +311,9 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
                     "explanation": f"We encountered an issue while analyzing {domain}.",
                     "low_confidence": True,
                     "website_url": url,
-                    "final_classification": "4-IT"
+                    "final_classification": "2-Internal IT",
+                    "crawler_type": crawler_type or "unknown",
+                    "classifier_type": "error_handler"
                 }
                 
                 # Add email to error response if input was an email
@@ -346,7 +363,13 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
             logger.error(f"Error processing request: {e}\n{traceback.format_exc()}")
             # Try to identify the error type if possible
             error_type, error_detail = detect_error_type(str(e))
-            error_result = create_error_result(domain if 'domain' in locals() else "unknown", error_type, error_detail, email if 'email' in locals() else None)
+            error_result = create_error_result(
+                domain if 'domain' in locals() else "unknown", 
+                error_type, 
+                error_detail, 
+                email if 'email' in locals() else None,
+                crawler_type if 'crawler_type' in locals() else "exception_handler"
+            )
             error_result["error"] = str(e)  # Add the actual error message
             if 'url' in locals():
                 error_result["website_url"] = url
@@ -404,7 +427,7 @@ def register_classify_routes(app, llm_classifier, snowflake_conn):
         except Exception as e:
             logger.error(f"Error processing email classification request: {e}\n{traceback.format_exc()}")
             error_type, error_detail = detect_error_type(str(e))
-            error_result = create_error_result("unknown", error_type, error_detail)
+            error_result = create_error_result("unknown", error_type, error_detail, None, "email_handler")
             error_result["error"] = str(e)
             return jsonify(error_result), 500
             
