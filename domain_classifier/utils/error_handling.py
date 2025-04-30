@@ -228,7 +228,8 @@ def is_domain_worth_crawling(domain: str) -> tuple:
     return True, has_dns, error_msg, potentially_flaky
 
 def create_error_result(domain: str, error_type: Optional[str] = None, 
-                        error_detail: Optional[str] = None, email: Optional[str] = None) -> Dict[str, Any]:
+                        error_detail: Optional[str] = None, email: Optional[str] = None,
+                        crawler_type: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a standardized error response based on the error type.
     
@@ -237,6 +238,7 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
         error_type (str, optional): The type of error detected
         error_detail (str, optional): Detailed explanation of the error
         email (str, optional): Email address if processing an email
+        crawler_type (str, optional): The type of crawler used/attempted
         
     Returns:
         dict: Standardized error response
@@ -320,6 +322,9 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
     
     error_result["explanation"] = explanation
     
+    # Add crawler_type if provided
+    error_result["crawler_type"] = crawler_type or "error_handler"  # Set a default
+    
     # Add final classification if possible
     if HAS_FINAL_CLASSIFICATION:
         # Import here to avoid circular imports
@@ -328,35 +333,10 @@ def create_error_result(domain: str, error_type: Optional[str] = None,
     else:
         # Default for DNS errors or connection errors
         if error_type in ["dns_error", "connection_error"]:
-            error_result["final_classification"] = "0-NO DNS RESOLUTION"
+            error_result["final_classification"] = "7-No Website available"
         elif error_type == "is_parked":
-            error_result["final_classification"] = "1-PARKED DOMAIN w/o Apollo"
+            error_result["final_classification"] = "6-Parked Domain - no enrichment"
         else:
-            error_result["final_classification"] = "4-IT"  # Default fallback
-    
-    return error_result
-
-def handle_request_exception(e: Exception, domain: str, email: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Handle exceptions raised during API requests.
-    
-    Args:
-        e (Exception): The exception that was raised
-        domain (str): The domain being processed
-        email (str, optional): Email address if processing an email
-        
-    Returns:
-        dict: Error response for the API
-    """
-    logger.error(f"Error processing request for {domain}: {e}")
-    
-    # Try to identify the error type if possible
-    error_type, error_detail = detect_error_type(str(e))
-    
-    # Create standardized error response
-    error_result = create_error_result(domain, error_type, error_detail, email)
-    
-    # Add the actual error message
-    error_result["error"] = str(e)
+            error_result["final_classification"] = "2-Internal IT"  # Default fallback
     
     return error_result
