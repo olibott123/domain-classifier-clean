@@ -8,6 +8,7 @@ from domain_classifier.utils.error_handling import detect_error_type, create_err
 from domain_classifier.storage.operations import save_to_snowflake
 from domain_classifier.utils.final_classification import determine_final_classification
 from domain_classifier.classifiers.decision_tree import create_parked_domain_result, is_parked_domain
+from domain_classifier.storage.result_processor import process_fresh_result
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -50,27 +51,47 @@ def register_enrich_routes(app, snowflake_conn):
                 
             # Direct check if domain is worth crawling or is parked
             worth_crawling, has_dns, dns_error, potentially_flaky = is_domain_worth_crawling(domain)
-            if not worth_crawling:
-                logger.info(f"Domain {domain} cannot be enriched: {dns_error}")
+            
+            # Check for DNS resolution failure
+            if not has_dns and dns_error != "parked_domain":
+                logger.info(f"Domain {domain} has DNS resolution issues: {dns_error}")
+                
                 # Create an error result
                 error_result = create_error_result(
                     domain,
-                    "dns_error" if "DNS" in dns_error else "connection_error",
+                    "dns_error",
                     dns_error,
                     email,
                     "early_check"
                 )
                 error_result["website_url"] = url
+                error_result["final_classification"] = "7-No Website available"
+                return jsonify(error_result), 200  # Return 200 instead of 503
                 
-                # Set appropriate final_classification
-                if dns_error == "parked_domain":
-                    error_result["final_classification"] = "6-Parked Domain - no enrichment"
-                else:
-                    error_result["final_classification"] = "7-No Website available"
-                    
-                return jsonify(error_result), 503
+            # Check for parked domain
+            if dns_error == "parked_domain" or not worth_crawling:
+                logger.info(f"Domain {domain} detected as parked domain during initial check")
+                
+                # Create a proper parked domain result
+                parked_result = create_parked_domain_result(domain, crawler_type="early_check_parked")
+                
+                # Process it through the normal result processor
+                result = process_fresh_result(parked_result, domain, email, url)
+                
+                # Ensure proper classification and fields
+                result["final_classification"] = "6-Parked Domain - no enrichment"
+                result["crawler_type"] = "early_check_parked"
+                result["classifier_type"] = "early_detection"
+                result["is_parked"] = True
+                
+                # Add email and URL if provided
+                if email:
+                    result["email"] = email
+                result["website_url"] = url
+                
+                return jsonify(result), 200  # Return 200 instead of 503
             
-            # Check for early parked domain detection
+            # Check for early parked domain detection using direct crawl
             try:
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
                 logger.info(f"Performing quick check for parked domain before enriching: {domain}")
@@ -81,27 +102,16 @@ def register_enrich_routes(app, snowflake_conn):
                     logger.info(f"Quick check detected parked domain: {domain}")
                     parked_result = create_parked_domain_result(domain, crawler_type="quick_check_parked")
                     
-                    # Process the parked domain result
-                    result = {
-                        "domain": domain,
-                        "predicted_class": "Parked Domain",
-                        "confidence_score": 0,
-                        "confidence_scores": {
-                            "Managed Service Provider": 0,
-                            "Integrator - Commercial A/V": 0,
-                            "Integrator - Residential A/V": 0,
-                            "Internal IT Department": 0
-                        },
-                        "explanation": parked_result.get("llm_explanation", f"The domain {domain} appears to be parked or inactive. This domain may be registered but not actively in use for a business."),
-                        "low_confidence": True,
-                        "is_parked": True,
-                        "final_classification": "6-Parked Domain - no enrichment",
-                        "crawler_type": "quick_check_parked",
-                        "classifier_type": "early_detection",
-                        "detection_method": "parked_domain_detection",
-                        "source": "fresh"
-                    }
+                    # Process the result through the normal result processor
+                    result = process_fresh_result(parked_result, domain, email, url)
                     
+                    # Ensure proper classification and fields
+                    result["final_classification"] = "6-Parked Domain - no enrichment"
+                    result["crawler_type"] = "quick_check_parked"
+                    result["classifier_type"] = "early_detection"
+                    result["is_parked"] = True
+                    
+                    # Add email and URL if provided
                     if email:
                         result["email"] = email
                     result["website_url"] = url
@@ -130,7 +140,7 @@ def register_enrich_routes(app, snowflake_conn):
                 if "final_classification" not in classification_result:
                     classification_result["final_classification"] = determine_final_classification(classification_result)
                     
-                return jsonify(classification_result), status_code
+                return jsonify(classification_result), 200  # Return 200 instead of status_code
             
             # Extract domain, email and crawler type from classification result
             domain = classification_result.get('domain')
@@ -139,7 +149,7 @@ def register_enrich_routes(app, snowflake_conn):
             
             if not domain:
                 logger.error("No domain found in classification result")
-                return jsonify({"error": "Failed to extract domain from classification result"}), 500
+                return jsonify({"error": "Failed to extract domain from classification result"}), 200  # Return 200 instead of 500
             
             # Import Apollo connector here to avoid circular imports
             from domain_classifier.enrichment.apollo_connector import ApolloConnector
@@ -247,6 +257,6 @@ def register_enrich_routes(app, snowflake_conn):
             if "final_classification" not in error_result:
                 error_result["final_classification"] = determine_final_classification(error_result)
                 
-            return jsonify(error_result), 500
+            return jsonify(error_result), 200  # Return 200 instead of 500
             
     return app
