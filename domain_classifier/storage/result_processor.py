@@ -43,6 +43,14 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "source": "fresh",
                 "is_parked": True
             }
+            
+            # Preserve crawler_type if present
+            if "crawler_type" in classification:
+                result["crawler_type"] = classification["crawler_type"]
+                
+            # Preserve classifier_type if present  
+            if "classifier_type" in classification:
+                result["classifier_type"] = classification["classifier_type"]
         else:
             # Normal case with confidence scores as integers (1-100)
             # Get max confidence 
@@ -193,6 +201,14 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "source": "fresh",
                 "is_parked": False
             }
+            
+            # Preserve crawler_type if present
+            if "crawler_type" in classification:
+                result["crawler_type"] = classification["crawler_type"]
+                
+            # Preserve classifier_type if present
+            if "classifier_type" in classification:
+                result["classifier_type"] = classification["classifier_type"]
 
         # Add website URL for clickable link if provided
         if url:
