@@ -73,6 +73,10 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
             llm_explanation = metadata.get('llm_explanation', '')
         except Exception as e:
             logger.warning(f"Could not parse model_metadata for {domain}: {e}")
+    
+    # Extract cached fields we need to preserve for end of result
+    crawler_type = record.get('CRAWLER_TYPE')  
+    classifier_type = record.get('CLASSIFIER_TYPE')
             
     # Extract Apollo data if available
     apollo_company_data = None
@@ -121,14 +125,6 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
         "is_parked": is_parked
     }
     
-    # Add crawler_type if present in record
-    if record.get('CRAWLER_TYPE'):
-        result["crawler_type"] = record.get('CRAWLER_TYPE')
-        
-    # Add classifier_type if present in record
-    if record.get('CLASSIFIER_TYPE'):
-        result["classifier_type"] = record.get('CLASSIFIER_TYPE')
-    
     # Add Apollo data if available
     if apollo_company_data:
         result["apollo_data"] = apollo_company_data
@@ -164,6 +160,17 @@ def process_cached_result(record: Dict[str, Any], domain: str, email: Optional[s
     # Determine and add the final classification
     result["final_classification"] = determine_final_classification(result)
     logger.info(f"Added final classification: {result['final_classification']} for {domain}")
+    
+    # Add crawler_type and classifier_type at the end to ensure they appear at the bottom
+    if crawler_type:
+        result["crawler_type"] = crawler_type
+    else:
+        result["crawler_type"] = "cached_unknown"
+        
+    if classifier_type:
+        result["classifier_type"] = classifier_type
+    else:
+        result["classifier_type"] = "cached_unknown"
     
     return result
 
