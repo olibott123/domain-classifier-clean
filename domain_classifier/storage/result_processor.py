@@ -44,13 +44,10 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "is_parked": True
             }
             
-            # Preserve crawler_type if present
-            if "crawler_type" in classification:
-                result["crawler_type"] = classification["crawler_type"]
-                
-            # Preserve classifier_type if present  
-            if "classifier_type" in classification:
-                result["classifier_type"] = classification["classifier_type"]
+            # These fields will be added later to ensure they appear at the bottom
+            preserved_crawler_type = classification.get("crawler_type", None)
+            preserved_classifier_type = classification.get("classifier_type", None)
+            
         else:
             # Normal case with confidence scores as integers (1-100)
             # Get max confidence 
@@ -202,13 +199,9 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
                 "is_parked": False
             }
             
-            # Preserve crawler_type if present
-            if "crawler_type" in classification:
-                result["crawler_type"] = classification["crawler_type"]
-                
-            # Preserve classifier_type if present
-            if "classifier_type" in classification:
-                result["classifier_type"] = classification["classifier_type"]
+            # These fields will be added later to ensure they appear at the bottom
+            preserved_crawler_type = classification.get("crawler_type", None)
+            preserved_classifier_type = classification.get("classifier_type", None)
 
         # Add website URL for clickable link if provided
         if url:
@@ -225,6 +218,19 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
         # Determine and add the final classification
         result["final_classification"] = determine_final_classification(result)
         logger.info(f"Added final classification: {result['final_classification']} for {domain}")
+        
+        # Add crawler_type and classifier_type at the end to ensure they appear at the bottom
+        if preserved_crawler_type:
+            result["crawler_type"] = preserved_crawler_type
+        else:
+            # Add a default if not present
+            result["crawler_type"] = classification.get("crawler_type", "unknown")
+            
+        if preserved_classifier_type:
+            result["classifier_type"] = preserved_classifier_type
+        else:
+            # Add a default if not present
+            result["classifier_type"] = classification.get("classifier_type", "unknown")
             
         return result
         
@@ -248,6 +254,8 @@ def process_fresh_result(classification: Dict[str, Any], domain: str, email: Opt
             "source": "error",
             "is_parked": False,
             "error": str(e),
-            "final_classification": "4-IT"  # Default for error cases
+            "final_classification": "2-Internal IT",  # Updated default for error cases
+            "crawler_type": classification.get("crawler_type", "error_processor"),
+            "classifier_type": classification.get("classifier_type", "error_processor")
         }
         return error_result
