@@ -118,9 +118,28 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
     try:
         logger.info(f"Starting Scrapy crawl for {url}")
         
+        # Parse the domain for parked domain checking later
+        domain = urlparse(url).netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
         # Create crawler instance and scrape
         crawler = ScrapyCrawler()
         content = crawler.scrape(url)
+        
+        # Check for parked domain indicators in content before proceeding
+        if content:
+            from domain_classifier.classifiers.decision_tree import is_parked_domain
+            if is_parked_domain(content, domain):
+                logger.info(f"Detected parked domain from Scrapy content: {domain}")
+                return None, ("is_parked", "Domain appears to be parked based on content analysis"), None
+                
+            # Check for proxy errors or hosting provider mentions that indicate parked domains
+            if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
+                                               ["proxy error", "error connecting", "godaddy", 
+                                                "domain registration", "hosting provider"]):
+                logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
+                return None, ("is_parked", "Domain appears to be parked with a domain registrar"), None
         
         if content and len(content.strip()) > 100:
             logger.info(f"Scrapy crawl successful, got {len(content)} characters")
