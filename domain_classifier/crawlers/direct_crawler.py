@@ -61,7 +61,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
                 from domain_classifier.classifiers.decision_tree import is_parked_domain
                 if is_parked_domain(text, domain):
                     logger.info(f"Direct crawl detected a parked domain: {domain}")
-                    return text, (None, None), "direct_parked_detection"
+                    return text, ("is_parked", "Domain appears to be parked"), "direct_parked_detection"
                     
                 return text, (None, None), "direct_quick"
         
@@ -78,7 +78,7 @@ def direct_crawl(url: str, timeout: float = 15.0) -> Tuple[Optional[str], Tuple[
             from domain_classifier.classifiers.decision_tree import is_parked_domain
             if is_parked_domain(html_content, domain):
                 logger.info(f"Direct crawl identified {domain} as a parked domain")
-                return html_content, (None, None), "direct_parked_detection"
+                return html_content, ("is_parked", "Domain appears to be parked"), "direct_parked_detection"
             
             if clean_text and len(clean_text) > 100:
                 logger.info(f"Direct crawl successful, got {len(clean_text)} characters")
