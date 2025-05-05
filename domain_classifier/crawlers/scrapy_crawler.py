@@ -712,6 +712,22 @@ class EnhancedScrapySpider(scrapy.Spider):
                 )
             else:
                 yield scrapy.Request(link, callback=self.parse)
+    
+    def closed(self, reason):
+        """Called when spider closes."""
+        # Transfer content fragments to crawler results
+        if self.content_fragments:
+            logger.info(f"Spider closing with {len(self.content_fragments)} content fragments")
+            # Signal each content fragment as a scraped item
+            for fragment in self.content_fragments:
+                if hasattr(self.crawler, 'signals'):
+                    self.crawler.signals.send_catch_log(
+                        signal=signals.item_scraped,
+                        item=fragment,
+                        spider=self
+                    )
+        else:
+            logger.warning(f"Spider closing with no content fragments")
 
 
 class EnhancedScrapyCrawler:
@@ -733,9 +749,16 @@ class EnhancedScrapyCrawler:
         })
         dispatcher.connect(self._crawler_results, signal=signals.item_scraped)
 
-    def _crawler_results(self, item):
-        """Collect scraped items."""
+    def _crawler_results(self, item, response=None, spider=None):
+        """Collect scraped items with better handling of content fragments."""
+        # Add some debugging
+        logger.info(f"Received result item with keys: {list(item.keys())}")
+        # Ensure we're storing content in the results list
         self.results.append(item)
+        # Log the content size for debugging
+        content = item.get('content', '')
+        if content:
+            logger.info(f"Added content to results: {len(content)} characters")
 
     @crochet.wait_for(timeout=120.0)  # Increased timeout for JS rendering
     def _run_spider(self, url):
@@ -749,11 +772,37 @@ class EnhancedScrapyCrawler:
             logger.info(f"Starting enhanced Scrapy crawl for {url}")
             self._run_spider(url)
             
+            # Debug the results
+            if not self.results:
+                logger.warning(f"No results returned by spider for {url}")
+                # Try direct crawl as a last resort
+                try:
+                    from domain_classifier.crawlers.direct_crawler import direct_crawl
+                    direct_content, _, _ = direct_crawl(url, timeout=5.0)
+                    if direct_content and len(direct_content) > 100:
+                        logger.info(f"Using direct crawl content: {len(direct_content)} characters")
+                        return direct_content
+                except Exception as direct_err:
+                    logger.error(f"Error in direct crawl fallback: {direct_err}")
+                return None
+            else:
+                logger.info(f"Processing {len(self.results)} results from Scrapy")
+            
             # Process results
             all_content = []
             has_raw_html = False
             raw_html = None
-
+            
+            # First collect all content items
+            for item in self.results:
+                content = item.get('content', '')
+                if content and len(content.strip()) > 30:
+                    all_content.append(content)
+                # Also check for raw HTML if content is minimal
+                if item.get('raw_html') and not has_raw_html:
+                    has_raw_html = True
+                    raw_html = item.get('raw_html')
+            
             # First process the homepage content (most important)
             homepage_content = None
             for item in self.results:
@@ -782,19 +831,20 @@ class EnhancedScrapyCrawler:
                 if len(content) > 30:  # Only add meaningful content
                     all_content.append(content)
             
-            # Combine all content
-            combined_text = ' '.join(all_content)
-            
-            # Clean up the text
-            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+            # If we have any content, return it combined
+            if all_content:
+                combined_text = ' '.join(all_content)
+                combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+                logger.info(f"Combined {len(all_content)} content items, total {len(combined_text)} characters")
+                return combined_text
             
             # Critical Fix 1: Look for content directly from the results if combined text is empty
-            if (not combined_text or len(combined_text) < 100) and self.results:
-                logger.info("No combined text or minimal content, trying alternate extraction")
+            if not all_content and self.results:
+                logger.info("No combined text, trying alternate extraction")
                 
                 # Approach 1: Try to get the longest content item directly
                 content_items = [(item.get('content', ''), len(item.get('content', ''))) for item in self.results 
-                                if item.get('content') and len(item.get('content', '').strip()) > 30]
+                               if item.get('content') and len(item.get('content', '').strip()) > 0]
                 
                 # Sort by content length
                 content_items.sort(key=lambda x: x[1], reverse=True)
@@ -806,40 +856,22 @@ class EnhancedScrapyCrawler:
                     return longest_content
             
             # Critical Fix 2: Look at the first item directly if we're still empty
-            if (not combined_text or len(combined_text) < 100) and self.results and len(self.results) > 0:
+            if not all_content and self.results and len(self.results) > 0:
                 first_item = self.results[0]
                 content = first_item.get('content', '')
-                if content and len(content.strip()) > 30:
+                if content:
                     logger.info(f"Using first result content directly: {len(content)} characters")
                     return content
-                    
-            # Critical Fix 3: If we have any content in combined_text, return it regardless of size
-            if combined_text and len(combined_text.strip()) > 0:
-                logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
-                return combined_text
-                
-            # Critical Fix 4: Check all items again if we somehow missed content
-            all_content_items = [item.get('content', '') for item in self.results if item.get('content')]
             
-            # No minimum size filter here anymore - we'll take anything if we reach this point
-            if all_content_items:
-                combined_text = ' '.join(all_content_items)
-                logger.info(f"Found content in alternate scan, extracted {len(combined_text)} characters")
-                return combined_text
-                
-            # If we have raw HTML, use it for parked domain detection
+            # If we have raw HTML, use that as a last resort
             if has_raw_html and raw_html:
-                logger.warning(f"No extracted content, using raw HTML for parked domain detection ({len(raw_html)} characters)")
+                logger.warning(f"Using raw HTML as last resort: {len(raw_html)} characters")
                 return raw_html
                 
-            # Only log a warning if we truly have nothing
-            if not self.results or len(self.results) == 0:
-                logger.warning(f"No results returned for {url}")
-            else:
-                logger.warning(f"Results found but no extractable content for {url}")
-                
+            # No usable content found
+            logger.warning(f"No usable content found in Scrapy results for {url}")
             return None
-            
+                
         except Exception as e:
             logger.error(f"Error in Enhanced Scrapy crawler: {e}")
             logger.error(traceback.format_exc())
