@@ -9,17 +9,25 @@ import scrapy
 from scrapy.crawler import CrawlerRunner
 from scrapy import signals
 from scrapy.signalmanager import dispatcher
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Optional
 from urllib.parse import urlparse
 import time
 import re
 from scrapy.http import HtmlResponse
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+import traceback
+
+# Import selenium - these imports are handled safely with try/except
+selenium_available = False
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    selenium_available = True
+except ImportError:
+    logging.warning("Selenium not installed. JavaScript rendering will be limited.")
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -197,6 +205,7 @@ class JavaScriptMiddleware:
         self.crawler = crawler
         self.selenium_driver = None
         self.js_urls = set()  # Keep track of URLs processed with JS
+        self.selenium_available = selenium_available
     
     @classmethod
     def from_crawler(cls, crawler):
@@ -213,37 +222,56 @@ class JavaScriptMiddleware:
         """Close the Selenium WebDriver when spider is closed."""
         if self.selenium_driver:
             logger.info("Closing Selenium WebDriver")
-            self.selenium_driver.quit()
+            try:
+                self.selenium_driver.quit()
+            except Exception as e:
+                logger.error(f"Error closing Selenium: {e}")
     
     def _initialize_selenium(self):
-        """Initialize Selenium WebDriver if not already done."""
+        """Initialize Selenium WebDriver if not already done and if available."""
+        if not self.selenium_available:
+            logger.warning("Selenium is not available - cannot render JavaScript")
+            return False
+            
         if not self.selenium_driver:
             logger.info("Initializing Selenium WebDriver")
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1920,1080")
-            
-            # Add a custom user agent
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
-            
             try:
-                self.selenium_driver = webdriver.Chrome(options=chrome_options)
+                chrome_options = Options()
+                chrome_options.add_argument("--headless")
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-dev-shm-usage")
+                chrome_options.add_argument("--disable-gpu")
+                chrome_options.add_argument("--window-size=1920,1080")
+                
+                # Add a custom user agent
+                chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
+                
+                try:
+                    # Try to use Service for newer selenium versions
+                    self.selenium_driver = webdriver.Chrome(options=chrome_options)
+                except Exception as e:
+                    logger.error(f"Error initializing Chrome with Service: {e}")
+                    # Fallback to older selenium versions
+                    try:
+                        self.selenium_driver = webdriver.Chrome(chrome_options=chrome_options)
+                    except Exception as e2:
+                        logger.error(f"Error initializing Chrome (fallback): {e2}")
+                        return False
+                        
                 logger.info("Selenium WebDriver initialized successfully")
+                return True
             except Exception as e:
                 logger.error(f"Error initializing Selenium WebDriver: {e}")
                 self.selenium_driver = None
+                return False
+        return True
     
     def process_request(self, request, spider):
         """Process request to handle JavaScript-heavy sites."""
         # Only use Selenium for requests that need JS rendering
         if request.meta.get('js_render', False):
             # Initialize Selenium if not done already
-            self._initialize_selenium()
-            
-            if not self.selenium_driver:
+            if not self._initialize_selenium():
                 logger.error("Failed to initialize Selenium, skipping JS rendering")
                 return None
             
@@ -287,6 +315,7 @@ class JavaScriptMiddleware:
                 
             except Exception as e:
                 logger.error(f"Error using Selenium for {url}: {e}")
+                logger.error(traceback.format_exc())
                 # Continue with standard processing
         
         # For all other requests, use normal processing
@@ -310,9 +339,9 @@ class EnhancedScrapySpider(scrapy.Spider):
         'DOWNLOADER_MIDDLEWARES': {
             'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware': None,
             'scrapy.downloadermiddlewares.retry.RetryMiddleware': None,
-            'domain_classifier.crawlers.enhanced_scrapy_crawler.RotatingUserAgentMiddleware': 400,
-            'domain_classifier.crawlers.enhanced_scrapy_crawler.SmartRetryMiddleware': 550,
-            'domain_classifier.crawlers.enhanced_scrapy_crawler.JavaScriptMiddleware': 600,
+            'domain_classifier.crawlers.scrapy_crawler.RotatingUserAgentMiddleware': 400,
+            'domain_classifier.crawlers.scrapy_crawler.SmartRetryMiddleware': 550,
+            'domain_classifier.crawlers.scrapy_crawler.JavaScriptMiddleware': 600,
         }
     }
     
@@ -346,8 +375,8 @@ class EnhancedScrapySpider(scrapy.Spider):
             domain = urlparse(url).netloc
             
             # Special handling for known JS-heavy sites or platforms
-            if self.js_required:
-                logger.info(f"Detected JS-heavy site: {domain}. Using Selenium.")
+            if self.js_required and selenium_available:
+                logger.info(f"Detected JS-heavy site: {domain}. Using Selenium if available.")
                 yield scrapy.Request(
                     url, 
                     callback=self.parse,
@@ -489,7 +518,7 @@ class EnhancedScrapySpider(scrapy.Spider):
         
         # Follow important links
         for link in important_links:
-            if self.js_required:
+            if self.js_required and selenium_available:
                 yield scrapy.Request(
                     link, 
                     callback=self.parse,
@@ -569,12 +598,11 @@ class EnhancedScrapyCrawler:
             
         except Exception as e:
             logger.error(f"Error in Enhanced Scrapy crawler: {e}")
-            import traceback
             logger.error(traceback.format_exc())
             return None
 
 
-def enhanced_scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
     Crawl a website using enhanced Scrapy with better error handling.
     
