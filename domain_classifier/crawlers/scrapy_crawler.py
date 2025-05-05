@@ -1,6 +1,6 @@
 """
 Enhanced Scrapy crawler implementation for domain classification.
-This module replaces the existing scrapy_crawler.py with improved capabilities.
+This module replaces the existing scrapy_crawler.py with improved capabilities for content extraction.
 """
 import logging
 import crochet
@@ -359,11 +359,12 @@ class EnhancedScrapySpider(scrapy.Spider):
         """Check if the domain likely requires JavaScript."""
         domain = urlparse(url).netloc.lower()
         
-        # List of patterns that indicate JS-heavy sites
+        # Expanded list of patterns that indicate JS-heavy sites
         js_patterns = [
             'wix.com', 'squarespace.com', 'webflow.com', 'shopify.com',
             'duda.co', 'weebly.com', 'godaddy.com/websites', 'wordpress.com',
-            'react', 'angular', 'vue', 'spa'
+            'react', 'angular', 'vue', 'spa', 'cloudflare', 'cdn',
+            'university', 'college', 'edu', 'school'  # Educational sites often use complex JS
         ]
         
         # Check if domain contains any JS-heavy patterns
@@ -423,25 +424,38 @@ class EnhancedScrapySpider(scrapy.Spider):
             yield from self._follow_important_links(response)
     
     def _extract_content(self, response):
-        """Extract content with hierarchical approach."""
+        """Extract content with enhanced hierarchical approach."""
         extracted_text = []
         
-        # Try multiple extraction methods
-        
-        # 1. Extract paragraph text
+        # 1. Extract paragraph text (enhanced with more specific extraction)
         paragraphs = response.css('p::text, p *::text').getall()
         clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
         extracted_text.extend(clean_paragraphs)
         
         # 2. Extract headings
-        headings = response.css('h1::text, h2::text, h3::text, h4::text, h1 *::text, h2 *::text, h3 *::text, h4 *::text').getall()
+        headings = response.css('h1::text, h2::text, h3::text, h4::text, h5::text, h6::text, h1 *::text, h2 *::text, h3 *::text, h4 *::text, h5 *::text, h6 *::text').getall()
         clean_headings = [h.strip() for h in headings if h.strip()]
         extracted_text.extend(clean_headings)
         
-        # 3. Extract div text (if text is still minimal)
+        # 3. Extract span elements (often contain important text)
+        span_texts = response.css('span::text').getall()
+        clean_spans = [s.strip() for s in span_texts if len(s.strip()) > 10]
+        extracted_text.extend(clean_spans)
+        
+        # 4. Extract button text (often contains action descriptions)
+        button_texts = response.css('button::text, a.button::text, .btn::text').getall()
+        clean_buttons = [b.strip() for b in button_texts if b.strip()]
+        extracted_text.extend(clean_buttons)
+        
+        # 5. Extract alt text from images (can contain descriptive content)
+        img_alts = response.css('img::attr(alt)').getall()
+        clean_alts = [alt.strip() for alt in img_alts if len(alt.strip()) > 5]
+        extracted_text.extend(clean_alts)
+        
+        # 6. Extract div text for content-heavy divs
         if len(' '.join(extracted_text)) < 500:
             # Look for divs that likely contain content
-            content_divs = response.css('div.content, div.main, div.article, div#content, div#main, article')
+            content_divs = response.css('div.content, div.main, div.article, div#content, div#main, article, section, .container, .about, .services')
             
             if content_divs:
                 # Extract text from identified content divs
@@ -455,19 +469,34 @@ class EnhancedScrapySpider(scrapy.Spider):
                     # Check if div doesn't contain other divs or paragraphs (likely a text node)
                     if not div.css('div, p'):
                         div_text = ' '.join(div.css('::text').getall()).strip()
-                        if len(div_text) > 50:  # Only include substantive text
+                        if len(div_text) > 30:  # Lowered threshold to catch more text
                             extracted_text.append(div_text)
         
-        # 4. Extract list items
+        # 7. Extract list items
         list_items = response.css('li::text, li *::text').getall()
         clean_list_items = [li.strip() for li in list_items if li.strip()]
         extracted_text.extend(clean_list_items)
         
-        # 5. Extract meta description if content is still minimal
-        if len(' '.join(extracted_text)) < 100:
-            meta_desc = response.css('meta[name="description"]::attr(content)').get()
-            if meta_desc and meta_desc.strip():
-                extracted_text.append(meta_desc.strip())
+        # 8. Extract meta description and keywords
+        meta_desc = response.css('meta[name="description"]::attr(content)').get()
+        if meta_desc and meta_desc.strip():
+            extracted_text.append(meta_desc.strip())
+            
+        meta_keywords = response.css('meta[name="keywords"]::attr(content)').get()
+        if meta_keywords and meta_keywords.strip():
+            extracted_text.append(meta_keywords.strip())
+        
+        # 9. Extract text from common content areas
+        for selector in ['.about-us', '.mission', '.vision', '.services', '.products', '.team', '.contact', '.footer', '.header']:
+            section_texts = response.css(f'{selector} ::text').getall()
+            clean_sections = [s.strip() for s in section_texts if s.strip()]
+            extracted_text.extend(clean_sections)
+        
+        # 10. Title is very important - add it with extra weight (3 times)
+        title = response.css('title::text').get()
+        if title and title.strip():
+            for _ in range(3):  # Add title multiple times for extra weight
+                extracted_text.append(title.strip())
         
         # Clean and join the extracted text
         all_text = ' '.join(extracted_text)
@@ -479,10 +508,12 @@ class EnhancedScrapySpider(scrapy.Spider):
     
     def _follow_important_links(self, response):
         """Follow important links like About, Services pages."""
-        # Define patterns for important pages
+        # Enhanced list of patterns for important pages
         important_patterns = [
             'about', 'services', 'solutions', 'products', 'company',
-            'what-we-do', 'technology', 'capabilities'
+            'what-we-do', 'technology', 'capabilities', 'team', 'mission',
+            'vision', 'contact', 'portfolio', 'work', 'clients', 'testimonials',
+            'partners', 'industries', 'expertise', 'case-studies', 'projects'
         ]
         
         # Extract all links
@@ -497,7 +528,7 @@ class EnhancedScrapySpider(scrapy.Spider):
             if href.startswith('/'):
                 full_url = response.urljoin(href)
                 same_domain_links.append(full_url)
-            else:
+            elif not href.startswith('#') and not href.startswith('mailto:') and not href.startswith('tel:'):
                 # Check if link is to same domain
                 try:
                     url_domain = urlparse(href).netloc
@@ -513,8 +544,8 @@ class EnhancedScrapySpider(scrapy.Spider):
             if any(pattern in link_lower for pattern in important_patterns):
                 important_links.append(link)
         
-        # Limit to 5 most important links
-        important_links = list(set(important_links))[:5]
+        # Increase the maximum number of links to follow
+        important_links = list(set(important_links))[:10]  # Increased from 5 to 10
         
         # Follow important links
         for link in important_links:
@@ -586,7 +617,8 @@ class EnhancedScrapyCrawler:
             # Clean up the text
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
             
-            if not combined_text or len(combined_text.strip()) < 100:
+            # Lowered threshold for acceptable content length
+            if not combined_text or len(combined_text.strip()) < 50:  # Reduced from 100 to 50
                 logger.warning(f"Minimal or no content extracted for {url}")
                 # Check if we have raw HTML to return for parked domain detection
                 raw_html = next((item.get('raw_html') for item in self.results if item.get('raw_html')), None)
@@ -641,8 +673,8 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                 logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
                 return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
-        # Return is_parked even with minimal or empty content
-        if not content or len(content.strip()) < 100:
+        # Lowered threshold for acceptable content
+        if not content or len(content.strip()) < 50:  # Reduced from 100 to 50
             logger.warning(f"Enhanced Scrapy crawl returned minimal or no content for {domain}")
             # Try a direct crawl as backup to check for parked domain
             try:
@@ -660,7 +692,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             
             return None, ("minimal_content", "Website returned minimal or no content")
         
-        if content and len(content.strip()) > 100:
+        if content and len(content.strip()) > 50:  # Reduced threshold
             logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
             return content, (None, None)
         elif content:
