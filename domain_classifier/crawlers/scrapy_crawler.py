@@ -25,7 +25,9 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException
+    from selenium.webdriver.common.by import By
     selenium_available = True
+    logging.info("Selenium is available for JavaScript rendering")
 except ImportError:
     logging.warning("Selenium not installed. JavaScript rendering will be limited.")
 
@@ -41,7 +43,11 @@ class RotatingUserAgentMiddleware:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/116.0',
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Edge/115.0.1901.200',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
+        # Added more agents for better rotation
+        'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/117.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/115.0.1901.203'
     ]
     
     def __init__(self):
@@ -54,6 +60,9 @@ class RotatingUserAgentMiddleware:
         
         # Set the User-Agent header
         request.headers['User-Agent'] = user_agent
+        # Add Sec-CH-UA header to simulate modern browser
+        request.headers['Sec-CH-UA'] = '"Google Chrome";v="115", "Chromium";v="115", "Not=A?Brand";v="24"'
+        request.headers['Accept-Language'] = 'en-US,en;q=0.9'
         return None
 
 
@@ -130,8 +139,14 @@ class SmartRetryMiddleware:
         desktop_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/116.0'
         ]
         new_request.headers['User-Agent'] = random.choice(desktop_agents)
+        
+        # Add other headers that might help
+        new_request.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        new_request.headers['Accept-Language'] = 'en-US,en;q=0.5'
+        new_request.headers['Cache-Control'] = 'no-cache'
         
         # Add delay
         retry_delay = 5 + (5 * retry_count)  # Longer delay for 403s
@@ -288,8 +303,18 @@ class JavaScriptMiddleware:
                 # Wait for JavaScript to load (wait for body to have content)
                 try:
                     WebDriverWait(self.selenium_driver, 10).until(
-                        EC.presence_of_element_located(('tag name', 'body'))
+                        EC.presence_of_element_located((By.TAG_NAME, 'body'))
                     )
+                    # Also wait for common content containers if possible
+                    for selector in ['main', 'article', '#content', '.content', '.main-content']:
+                        try:
+                            WebDriverWait(self.selenium_driver, 2).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                            )
+                            logger.info(f"Found content container: {selector}")
+                            break
+                        except TimeoutException:
+                            pass
                 except TimeoutException:
                     logger.warning(f"Timeout waiting for body element on {url}")
                 
@@ -301,6 +326,28 @@ class JavaScriptMiddleware:
                 time.sleep(1)
                 self.selenium_driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(1)
+                
+                # Try clicking on "Accept cookies" buttons if present
+                try:
+                    cookie_selectors = [
+                        'button[contains(text(), "Accept")', 
+                        'button[contains(text(), "Agree")',
+                        'button[contains(text(), "Accept cookies")',
+                        'button[contains(text(), "Accept all")',
+                        '.cookie-consent-accept',
+                        '#cookie-accept'
+                    ]
+                    for selector in cookie_selectors:
+                        try:
+                            self.selenium_driver.find_element(By.XPATH, f"//{selector}").click()
+                            logger.info(f"Clicked cookie acceptance button: {selector}")
+                            time.sleep(1)
+                            break
+                        except:
+                            pass
+                except Exception as e:
+                    # Not critical, just log it
+                    logger.debug(f"Could not handle cookie dialog: {e}")
                 
                 # Get the rendered HTML
                 body = self.selenium_driver.page_source
@@ -354,6 +401,7 @@ class EnhancedScrapySpider(scrapy.Spider):
             self.domain = self.domain[4:]
         self.content_fragments = []
         self.js_required = self._check_if_js_required(url)
+        self.found_content = False
     
     def _check_if_js_required(self, url):
         """Check if the domain likely requires JavaScript."""
@@ -361,14 +409,36 @@ class EnhancedScrapySpider(scrapy.Spider):
         
         # Expanded list of patterns that indicate JS-heavy sites
         js_patterns = [
+            # Website builders
             'wix.com', 'squarespace.com', 'webflow.com', 'shopify.com',
             'duda.co', 'weebly.com', 'godaddy.com/websites', 'wordpress.com',
-            'react', 'angular', 'vue', 'spa', 'cloudflare', 'cdn',
-            'university', 'college', 'edu', 'school'  # Educational sites often use complex JS
+            # JS frameworks
+            'react', 'angular', 'vue', 'spa', 'jquery', 'gsap', 'ajax',
+            # CDNs and security
+            'cloudflare', 'cdn', 'akamai', 'fastly',
+            # Educational and government sites
+            'university', 'college', 'edu', 'school', '.gov', 
+            # Common complex sites
+            'dashboard', 'portal', 'app', 'login',
+            # Added more domains that typically use JS
+            'hubspot', 'salesforce', 'zendesk', 'freshdesk', 'clickfunnels',
+            'woocommerce', 'prestashop', 'magento', 'shopify', 'bigcommerce',
+            # Common site sections that often use JS
+            'store', 'shop', 'showcase', 'portfolio', 'gallery'
         ]
         
         # Check if domain contains any JS-heavy patterns
-        return any(pattern in domain for pattern in js_patterns)
+        for pattern in js_patterns:
+            if pattern in domain:
+                return True
+                
+        # Also check TLDs that often host js-heavy sites
+        tlds = ['.io', '.app', '.dev', '.tech', '.ai']
+        for tld in tlds:
+            if domain.endswith(tld):
+                return True
+                
+        return False
     
     def start_requests(self):
         """Generate initial requests with appropriate metadata."""
@@ -406,14 +476,26 @@ class EnhancedScrapySpider(scrapy.Spider):
             logger.warning(f"Empty response body for {response.url}")
             return {'url': response.url, 'content': '', 'is_empty': True}
         
-        # Extract all text content
+        # Log the raw HTML length for diagnostic purposes 
+        logger.info(f"Raw HTML size for {response.url}: {len(response.text)} bytes")
+        
+        # Extract all text content with improved methods
         content = self._extract_content(response)
+        
+        # Log the extracted content length
+        logger.info(f"Extracted content size: {len(content)} characters")
+        if len(content) > 0:
+            logger.info(f"Content sample: {content[:200]}...")
+        
+        if len(content) > 30:  # More than minimum threshold
+            self.found_content = True
         
         # Store content for this URL
         url_info = {
             'url': response.url,
             'content': content,
-            'is_homepage': response.url == self.original_url
+            'is_homepage': response.url == self.original_url,
+            'raw_html': response.text[:50000] if len(content) < 30 else None  # Store raw HTML if extraction failed
         }
         
         self.content_fragments.append(url_info)
@@ -427,57 +509,60 @@ class EnhancedScrapySpider(scrapy.Spider):
         """Extract content with enhanced hierarchical approach."""
         extracted_text = []
         
-        # 1. Extract paragraph text (enhanced with more specific extraction)
-        paragraphs = response.css('p::text, p *::text').getall()
-        clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
-        extracted_text.extend(clean_paragraphs)
+        # 1. Try to get content from common container elements first
+        containers_found = False
+        for selector in [
+            'main', 'article', '#content', '#main', '.content', '.main-content', 
+            '.page-content', '.entry-content', '.post-content', '.article-content',
+            'section', '.container', '.wrapper'
+        ]:
+            container_texts = response.css(f'{selector}::text, {selector} *::text').getall()
+            clean_container_texts = [t.strip() for t in container_texts if t.strip()]
+            if clean_container_texts:
+                containers_found = True
+                extracted_text.extend(clean_container_texts)
+                logger.info(f"Found content in container: {selector} ({len(clean_container_texts)} text fragments)")
         
-        # 2. Extract headings
-        headings = response.css('h1::text, h2::text, h3::text, h4::text, h5::text, h6::text, h1 *::text, h2 *::text, h3 *::text, h4 *::text, h5 *::text, h6 *::text').getall()
-        clean_headings = [h.strip() for h in headings if h.strip()]
-        extracted_text.extend(clean_headings)
-        
-        # 3. Extract span elements (often contain important text)
-        span_texts = response.css('span::text').getall()
-        clean_spans = [s.strip() for s in span_texts if len(s.strip()) > 10]
-        extracted_text.extend(clean_spans)
-        
-        # 4. Extract button text (often contains action descriptions)
-        button_texts = response.css('button::text, a.button::text, .btn::text').getall()
-        clean_buttons = [b.strip() for b in button_texts if b.strip()]
-        extracted_text.extend(clean_buttons)
-        
-        # 5. Extract alt text from images (can contain descriptive content)
-        img_alts = response.css('img::attr(alt)').getall()
-        clean_alts = [alt.strip() for alt in img_alts if len(alt.strip()) > 5]
-        extracted_text.extend(clean_alts)
-        
-        # 6. Extract div text for content-heavy divs
-        if len(' '.join(extracted_text)) < 500:
-            # Look for divs that likely contain content
-            content_divs = response.css('div.content, div.main, div.article, div#content, div#main, article, section, .container, .about, .services')
+        # 2. If no containers found, extract structure based on common elements
+        if not containers_found or len(' '.join(extracted_text)) < 100:
+            # a) Extract paragraph text (most important content)
+            paragraphs = response.css('p::text, p *::text').getall()
+            clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
+            extracted_text.extend(clean_paragraphs)
             
-            if content_divs:
-                # Extract text from identified content divs
-                for div in content_divs:
-                    div_texts = div.css('*::text').getall()
-                    clean_div_texts = [t.strip() for t in div_texts if t.strip()]
-                    extracted_text.extend(clean_div_texts)
-            else:
-                # If no content divs found, look for any divs with substantial text
-                for div in response.css('div'):
-                    # Check if div doesn't contain other divs or paragraphs (likely a text node)
-                    if not div.css('div, p'):
-                        div_text = ' '.join(div.css('::text').getall()).strip()
-                        if len(div_text) > 30:  # Lowered threshold to catch more text
-                            extracted_text.append(div_text)
+            # b) Extract headings
+            headings = response.css('h1::text, h2::text, h3::text, h4::text, h5::text, h6::text, h1 *::text, h2 *::text, h3 *::text, h4 *::text, h5 *::text, h6 *::text').getall()
+            clean_headings = [h.strip() for h in headings if h.strip()]
+            extracted_text.extend(clean_headings)
+            
+            # c) Extract span elements (often contain important text)
+            span_texts = response.css('span::text').getall()
+            clean_spans = [s.strip() for s in span_texts if len(s.strip()) > 5]
+            extracted_text.extend(clean_spans)
+            
+            # d) Extract button text (often contains action descriptions)
+            button_texts = response.css('button::text, a.button::text, .btn::text').getall()
+            clean_buttons = [b.strip() for b in button_texts if b.strip()]
+            extracted_text.extend(clean_buttons)
+            
+            # e) Extract alt text from images (can contain descriptive content)
+            img_alts = response.css('img::attr(alt)').getall()
+            clean_alts = [alt.strip() for alt in img_alts if len(alt.strip()) > 5]
+            extracted_text.extend(clean_alts)
+            
+            # f) Extract list items (often contain important information)
+            list_items = response.css('li::text, li *::text').getall()
+            clean_list_items = [li.strip() for li in list_items if li.strip()]
+            extracted_text.extend(clean_list_items)
         
-        # 7. Extract list items
-        list_items = response.css('li::text, li *::text').getall()
-        clean_list_items = [li.strip() for li in list_items if li.strip()]
-        extracted_text.extend(clean_list_items)
+        # 3. Always extract meta information
+        # a) Title (very important - add it with extra weight by including 3 times)
+        title = response.css('title::text').get()
+        if title and title.strip():
+            for _ in range(3):  # Add title multiple times for extra weight
+                extracted_text.append(title.strip())
         
-        # 8. Extract meta description and keywords
+        # b) Meta description and keywords
         meta_desc = response.css('meta[name="description"]::attr(content)').get()
         if meta_desc and meta_desc.strip():
             extracted_text.append(meta_desc.strip())
@@ -486,23 +571,53 @@ class EnhancedScrapySpider(scrapy.Spider):
         if meta_keywords and meta_keywords.strip():
             extracted_text.append(meta_keywords.strip())
         
-        # 9. Extract text from common content areas
-        for selector in ['.about-us', '.mission', '.vision', '.services', '.products', '.team', '.contact', '.footer', '.header']:
+        # 4. Extract text from common content areas by class/id
+        for selector in [
+            '.about-us', '.mission', '.vision', '.services', '.products', 
+            '.team', '.contact', '.footer', '.header', '.about', 
+            '#about', '#services', '#products', '#contact',
+            '.home-content', '.intro', '.hero', '.banner'
+        ]:
             section_texts = response.css(f'{selector} ::text').getall()
             clean_sections = [s.strip() for s in section_texts if s.strip()]
             extracted_text.extend(clean_sections)
         
-        # 10. Title is very important - add it with extra weight (3 times)
-        title = response.css('title::text').get()
-        if title and title.strip():
-            for _ in range(3):  # Add title multiple times for extra weight
-                extracted_text.append(title.strip())
+        # 5. If we still have minimal content, try a more aggressive approach - grab all visible text
+        if len(' '.join(extracted_text)) < 300:
+            # Select all visible text except scripts and styles
+            all_texts = response.css('body *:not(script):not(style)::text').getall()
+            clean_all_texts = [t.strip() for t in all_texts if t.strip()]
+            extracted_text.extend(clean_all_texts)
+        
+        # 6. Special handling for divs if content is still minimal
+        if len(' '.join(extracted_text)) < 200:
+            # Look for divs with substantial text but not too big 
+            # (to avoid capturing entire page in one div)
+            for div in response.css('div'):
+                div_text = ' '.join(div.css('::text').getall()).strip()
+                if 30 < len(div_text) < 1000:  # Just right size for content
+                    extracted_text.append(div_text)
         
         # Clean and join the extracted text
         all_text = ' '.join(extracted_text)
         
         # Remove excessive whitespace
         all_text = re.sub(r'\s+', ' ', all_text).strip()
+        
+        # Final fallback: if extraction failed completely, use simplified raw HTML
+        if len(all_text) < 30 and response.text:
+            logger.warning(f"Content extraction methods failed, falling back to simplified HTML for {response.url}")
+            # Get raw HTML and clean it
+            html = response.text
+            # Basic HTML cleaning
+            clean_html = re.sub(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', ' ', html, flags=re.DOTALL)
+            clean_html = re.sub(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', ' ', clean_html, flags=re.DOTALL)
+            clean_html = re.sub(r'<[^>]+>', ' ', clean_html)
+            clean_html = re.sub(r'\s+', ' ', clean_html).strip()
+            
+            if len(clean_html) > 50:
+                all_text = clean_html
+                logger.info(f"Extracted {len(all_text)} characters from simplified HTML")
         
         return all_text
     
@@ -513,7 +628,10 @@ class EnhancedScrapySpider(scrapy.Spider):
             'about', 'services', 'solutions', 'products', 'company',
             'what-we-do', 'technology', 'capabilities', 'team', 'mission',
             'vision', 'contact', 'portfolio', 'work', 'clients', 'testimonials',
-            'partners', 'industries', 'expertise', 'case-studies', 'projects'
+            'partners', 'industries', 'expertise', 'case-studies', 'projects',
+            # Added more important patterns
+            'features', 'support', 'how-it-works', 'faq', 'overview',
+            'benefits', 'our-team', 'careers', 'locations', 'history'
         ]
         
         # Extract all links
@@ -524,16 +642,21 @@ class EnhancedScrapySpider(scrapy.Spider):
         for link in links:
             href = link.attrib['href']
             
+            # Skip if it's one of these types
+            if not href or href.startswith('#') or href.startswith('mailto:') or href.startswith('tel:'):
+                continue
+                
             # Handle relative URLs
             if href.startswith('/'):
                 full_url = response.urljoin(href)
                 same_domain_links.append(full_url)
-            elif not href.startswith('#') and not href.startswith('mailto:') and not href.startswith('tel:'):
+            else:
                 # Check if link is to same domain
                 try:
                     url_domain = urlparse(href).netloc
-                    if url_domain == self.domain or url_domain == 'www.' + self.domain:
-                        same_domain_links.append(href)
+                    if not url_domain or url_domain == self.domain or url_domain == 'www.' + self.domain:
+                        full_url = response.urljoin(href)
+                        same_domain_links.append(full_url)
                 except Exception:
                     continue
         
@@ -546,6 +669,8 @@ class EnhancedScrapySpider(scrapy.Spider):
         
         # Increase the maximum number of links to follow
         important_links = list(set(important_links))[:10]  # Increased from 5 to 10
+        
+        logger.info(f"Following {len(important_links)} important links")
         
         # Follow important links
         for link in important_links:
@@ -600,11 +725,20 @@ class EnhancedScrapyCrawler:
             
             # Process results
             all_content = []
+            has_raw_html = False
+            raw_html = None
             
             # First add homepage content
             homepage_content = next((item['content'] for item in self.results if item.get('is_homepage', False)), None)
             if homepage_content:
                 all_content.append(homepage_content)
+            
+            # Check if we have raw HTML for homepage
+            for item in self.results:
+                if item.get('is_homepage', False) and item.get('raw_html'):
+                    has_raw_html = True
+                    raw_html = item.get('raw_html')
+                    break
             
             # Then add other page content
             for item in self.results:
@@ -617,13 +751,16 @@ class EnhancedScrapyCrawler:
             # Clean up the text
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
             
-            # Lowered threshold for acceptable content length
-            if not combined_text or len(combined_text.strip()) < 50:  # Reduced from 100 to 50
+            # Lowered threshold for acceptable content length to 30 characters
+            if not combined_text or len(combined_text.strip()) < 30:
                 logger.warning(f"Minimal or no content extracted for {url}")
-                # Check if we have raw HTML to return for parked domain detection
-                raw_html = next((item.get('raw_html') for item in self.results if item.get('raw_html')), None)
-                if raw_html:
+                
+                # If we have raw HTML, use it for parked domain detection
+                if has_raw_html and raw_html:
+                    logger.info(f"Using raw HTML for parked domain detection ({len(raw_html)} characters)")
                     return raw_html
+                    
+                return None
             
             logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
             return combined_text
@@ -673,8 +810,8 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                 logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
                 return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
-        # Lowered threshold for acceptable content
-        if not content or len(content.strip()) < 50:  # Reduced from 100 to 50
+        # Lowered threshold for acceptable content to 30 characters (very minimal)
+        if not content or len(content.strip()) < 30:
             logger.warning(f"Enhanced Scrapy crawl returned minimal or no content for {domain}")
             # Try a direct crawl as backup to check for parked domain
             try:
@@ -692,7 +829,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             
             return None, ("minimal_content", "Website returned minimal or no content")
         
-        if content and len(content.strip()) > 50:  # Reduced threshold
+        if content and len(content.strip()) > 30:  # Using reduced threshold
             logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
             return content, (None, None)
         elif content:
@@ -708,3 +845,17 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
         error_type, error_detail = detect_error_type(str(e))
         logger.error(f"Error in Enhanced Scrapy crawler: {e} (Type: {error_type})")
         return None, (error_type, error_detail)
+
+
+def enhanced_scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+    """
+    Alias for scrapy_crawl to be used by the apify_crawler module.
+    This allows for a seamless replacement.
+    
+    Args:
+        url (str): The URL to crawl
+        
+    Returns:
+        tuple: Same as scrapy_crawl
+    """
+    return scrapy_crawl(url)
