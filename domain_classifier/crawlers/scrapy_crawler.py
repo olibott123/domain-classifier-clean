@@ -1,4 +1,7 @@
-"""Scrapy-based crawler for domain classification."""
+"""
+Enhanced Scrapy crawler implementation for domain classification.
+This module replaces the existing scrapy_crawler.py with improved capabilities.
+"""
 import logging
 import crochet
 crochet.setup()
@@ -6,133 +9,574 @@ import scrapy
 from scrapy.crawler import CrawlerRunner
 from scrapy import signals
 from scrapy.signalmanager import dispatcher
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any, List
 from urllib.parse import urlparse
+import time
+import re
+from scrapy.http import HtmlResponse
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class ScrapyCrawler:
+class RotatingUserAgentMiddleware:
+    """Middleware to rotate user agents to avoid detection."""
+    
+    USER_AGENTS = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/116.0',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Edge/115.0.1901.200',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
+    ]
+    
     def __init__(self):
+        self.current_index = 0
+    
+    def process_request(self, request, spider):
+        # Rotate through user agents
+        user_agent = self.USER_AGENTS[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.USER_AGENTS)
+        
+        # Set the User-Agent header
+        request.headers['User-Agent'] = user_agent
+        return None
+
+
+class SmartRetryMiddleware:
+    """Middleware for smart retry logic with different strategies."""
+    
+    def __init__(self, settings):
+        self.max_retry_times = settings.getint('RETRY_TIMES', 3)
+        self.retry_http_codes = set(settings.getlist('RETRY_HTTP_CODES', [500, 502, 503, 504, 408, 429, 403]))
+        self.priority_adjust = settings.getint('RETRY_PRIORITY_ADJUST', -1)
+    
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler.settings)
+    
+    def process_response(self, request, response, spider):
+        # Check if response is in retry codes
+        if request.meta.get('dont_retry', False):
+            return response
+            
+        if response.status in self.retry_http_codes:
+            retry_count = request.meta.get('retry_count', 0)
+            
+            if retry_count < self.max_retry_times:
+                # Implement different retry strategies based on error code
+                if response.status == 403:  # Forbidden
+                    return self._handle_forbidden(request, response, spider, retry_count)
+                elif response.status == 429:  # Too Many Requests
+                    return self._handle_rate_limit(request, response, spider, retry_count)
+                else:  # Standard retry
+                    return self._do_retry(request, response, spider, retry_count)
+        
+        return response
+    
+    def process_exception(self, request, exception, spider):
+        # Handle connection-related exceptions
+        retry_count = request.meta.get('retry_count', 0)
+        
+        if retry_count < self.max_retry_times:
+            # Log the exception
+            logger.info(f"Retrying {request.url} due to exception: {exception.__class__.__name__}")
+            
+            # Use appropriate delay based on retry count
+            retry_delay = 2 ** retry_count  # Exponential backoff
+            
+            # Create a new request
+            new_request = request.copy()
+            new_request.meta['retry_count'] = retry_count + 1
+            new_request.dont_filter = True
+            new_request.priority = request.priority + self.priority_adjust
+            
+            # Add delay
+            new_request.meta['download_slot'] = self._get_slot(request)
+            new_request.meta['download_delay'] = retry_delay
+            
+            logger.info(f"Retry {retry_count+1}/{self.max_retry_times} for {request.url} with delay {retry_delay}s")
+            
+            return new_request
+        
+        return None
+    
+    def _handle_forbidden(self, request, response, spider, retry_count):
+        """Handle 403 Forbidden responses with special strategy."""
+        logger.info(f"Handling 403 Forbidden for {request.url}")
+        
+        # Create a new request with different User-Agent
+        new_request = request.copy()
+        new_request.meta['retry_count'] = retry_count + 1
+        new_request.dont_filter = True
+        new_request.priority = request.priority + self.priority_adjust
+        
+        # Add custom User-Agent
+        import random
+        desktop_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+        ]
+        new_request.headers['User-Agent'] = random.choice(desktop_agents)
+        
+        # Add delay
+        retry_delay = 5 + (5 * retry_count)  # Longer delay for 403s
+        new_request.meta['download_slot'] = self._get_slot(request)
+        new_request.meta['download_delay'] = retry_delay
+        
+        logger.info(f"Retry {retry_count+1}/{self.max_retry_times} for {request.url} with delay {retry_delay}s")
+        
+        return new_request
+    
+    def _handle_rate_limit(self, request, response, spider, retry_count):
+        """Handle 429 Too Many Requests with appropriate backoff."""
+        logger.info(f"Handling rate limit (429) for {request.url}")
+        
+        # Create a new request
+        new_request = request.copy()
+        new_request.meta['retry_count'] = retry_count + 1
+        new_request.dont_filter = True
+        new_request.priority = request.priority + self.priority_adjust
+        
+        # Calculate backoff time - check for Retry-After header first
+        retry_after = response.headers.get('Retry-After')
+        if retry_after:
+            try:
+                # Retry-After can be an integer or a date
+                retry_delay = int(retry_after)
+            except ValueError:
+                # If it's a date, use a default delay
+                retry_delay = 30 * (retry_count + 1)
+        else:
+            # Exponential backoff with jitter
+            import random
+            retry_delay = (2 ** retry_count) * 10 + random.uniform(0, 5)
+        
+        # Add delay
+        new_request.meta['download_slot'] = self._get_slot(request)
+        new_request.meta['download_delay'] = retry_delay
+        
+        logger.info(f"Rate limit retry {retry_count+1}/{self.max_retry_times} for {request.url} with delay {retry_delay}s")
+        
+        return new_request
+    
+    def _do_retry(self, request, response, spider, retry_count):
+        """Standard retry logic."""
+        # Create a new request
+        new_request = request.copy()
+        new_request.meta['retry_count'] = retry_count + 1
+        new_request.dont_filter = True
+        new_request.priority = request.priority + self.priority_adjust
+        
+        # Calculate delay with exponential backoff
+        retry_delay = 2 ** retry_count
+        
+        # Add delay
+        new_request.meta['download_slot'] = self._get_slot(request)
+        new_request.meta['download_delay'] = retry_delay
+        
+        logger.info(f"Standard retry {retry_count+1}/{self.max_retry_times} for {request.url} with delay {retry_delay}s")
+        
+        return new_request
+    
+    def _get_slot(self, request):
+        """Get download slot for the request."""
+        return request.meta.get('download_slot') or urlparse(request.url).netloc
+
+
+class JavaScriptMiddleware:
+    """Middleware to handle JavaScript-heavy sites using Selenium."""
+    
+    def __init__(self, crawler):
+        self.crawler = crawler
+        self.selenium_driver = None
+        self.js_urls = set()  # Keep track of URLs processed with JS
+    
+    @classmethod
+    def from_crawler(cls, crawler):
+        middleware = cls(crawler)
+        crawler.signals.connect(middleware.spider_opened, signal=signals.spider_opened)
+        crawler.signals.connect(middleware.spider_closed, signal=signals.spider_closed)
+        return middleware
+    
+    def spider_opened(self, spider):
+        """Initialize Selenium WebDriver when spider is opened."""
+        pass  # Lazy initialization when needed
+    
+    def spider_closed(self, spider):
+        """Close the Selenium WebDriver when spider is closed."""
+        if self.selenium_driver:
+            logger.info("Closing Selenium WebDriver")
+            self.selenium_driver.quit()
+    
+    def _initialize_selenium(self):
+        """Initialize Selenium WebDriver if not already done."""
+        if not self.selenium_driver:
+            logger.info("Initializing Selenium WebDriver")
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080")
+            
+            # Add a custom user agent
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
+            
+            try:
+                self.selenium_driver = webdriver.Chrome(options=chrome_options)
+                logger.info("Selenium WebDriver initialized successfully")
+            except Exception as e:
+                logger.error(f"Error initializing Selenium WebDriver: {e}")
+                self.selenium_driver = None
+    
+    def process_request(self, request, spider):
+        """Process request to handle JavaScript-heavy sites."""
+        # Only use Selenium for requests that need JS rendering
+        if request.meta.get('js_render', False):
+            # Initialize Selenium if not done already
+            self._initialize_selenium()
+            
+            if not self.selenium_driver:
+                logger.error("Failed to initialize Selenium, skipping JS rendering")
+                return None
+            
+            url = request.url
+            logger.info(f"Using Selenium to render JavaScript for {url}")
+            
+            try:
+                # Load the page with Selenium
+                self.selenium_driver.get(url)
+                
+                # Add this URL to the set of JS-processed URLs
+                self.js_urls.add(url)
+                
+                # Wait for JavaScript to load (wait for body to have content)
+                try:
+                    WebDriverWait(self.selenium_driver, 10).until(
+                        EC.presence_of_element_located(('tag name', 'body'))
+                    )
+                except TimeoutException:
+                    logger.warning(f"Timeout waiting for body element on {url}")
+                
+                # Additional wait for dynamic content
+                time.sleep(3)
+                
+                # Scroll to load lazy content
+                self.selenium_driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+                time.sleep(1)
+                self.selenium_driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1)
+                
+                # Get the rendered HTML
+                body = self.selenium_driver.page_source
+                
+                # Return the HTML response
+                return HtmlResponse(
+                    url=url,
+                    body=body.encode('utf-8'),
+                    encoding='utf-8',
+                    request=request
+                )
+                
+            except Exception as e:
+                logger.error(f"Error using Selenium for {url}: {e}")
+                # Continue with standard processing
+        
+        # For all other requests, use normal processing
+        return None
+
+
+class EnhancedScrapySpider(scrapy.Spider):
+    """Enhanced Spider for domain classification with improved content extraction."""
+    
+    name = "enhanced_domain_spider"
+    
+    custom_settings = {
+        'DOWNLOAD_TIMEOUT': 40,  # Increased from default
+        'RETRY_TIMES': 3,  # More retries before failing
+        'RETRY_HTTP_CODES': [500, 502, 503, 504, 408, 429, 403],  # Added 403
+        'COOKIES_ENABLED': True,  # Enable cookies for session-based sites
+        'REDIRECT_MAX_TIMES': 8,  # Follow more redirects
+        'DOWNLOAD_DELAY': 0.5,  # Small delay to reduce blocking
+        'HTTPERROR_ALLOW_ALL': True,  # Process pages that return errors
+        'ROBOTSTXT_OBEY': False,  # Skip robots.txt check for better success rate
+        'DOWNLOADER_MIDDLEWARES': {
+            'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware': None,
+            'scrapy.downloadermiddlewares.retry.RetryMiddleware': None,
+            'domain_classifier.crawlers.enhanced_scrapy_crawler.RotatingUserAgentMiddleware': 400,
+            'domain_classifier.crawlers.enhanced_scrapy_crawler.SmartRetryMiddleware': 550,
+            'domain_classifier.crawlers.enhanced_scrapy_crawler.JavaScriptMiddleware': 600,
+        }
+    }
+    
+    def __init__(self, url):
+        """Initialize spider with URL."""
+        self.start_urls = [url]
+        self.original_url = url
+        self.domain = urlparse(url).netloc
+        if self.domain.startswith('www.'):
+            self.domain = self.domain[4:]
+        self.content_fragments = []
+        self.js_required = self._check_if_js_required(url)
+    
+    def _check_if_js_required(self, url):
+        """Check if the domain likely requires JavaScript."""
+        domain = urlparse(url).netloc.lower()
+        
+        # List of patterns that indicate JS-heavy sites
+        js_patterns = [
+            'wix.com', 'squarespace.com', 'webflow.com', 'shopify.com',
+            'duda.co', 'weebly.com', 'godaddy.com/websites', 'wordpress.com',
+            'react', 'angular', 'vue', 'spa'
+        ]
+        
+        # Check if domain contains any JS-heavy patterns
+        return any(pattern in domain for pattern in js_patterns)
+    
+    def start_requests(self):
+        """Generate initial requests with appropriate metadata."""
+        for url in self.start_urls:
+            domain = urlparse(url).netloc
+            
+            # Special handling for known JS-heavy sites or platforms
+            if self.js_required:
+                logger.info(f"Detected JS-heavy site: {domain}. Using Selenium.")
+                yield scrapy.Request(
+                    url, 
+                    callback=self.parse,
+                    meta={
+                        'js_render': True,
+                        'domain_type': 'js_heavy',
+                        'dont_redirect': False,
+                        'handle_httpstatus_list': [403, 404, 500]
+                    }
+                )
+            else:
+                # Standard request for most domains
+                yield scrapy.Request(
+                    url, 
+                    callback=self.parse,
+                    meta={
+                        'dont_redirect': False,
+                        'handle_httpstatus_list': [403, 404, 500]
+                    }
+                )
+    
+    def parse(self, response):
+        """Parse response with improved content extraction."""
+        # Check for empty responses
+        if not response.body:
+            logger.warning(f"Empty response body for {response.url}")
+            return {'url': response.url, 'content': '', 'is_empty': True}
+        
+        # Extract all text content
+        content = self._extract_content(response)
+        
+        # Store content for this URL
+        url_info = {
+            'url': response.url,
+            'content': content,
+            'is_homepage': response.url == self.original_url
+        }
+        
+        self.content_fragments.append(url_info)
+        
+        # Only follow links from homepage to avoid crawling too much
+        if response.url == self.original_url:
+            # Extract and follow important links
+            yield from self._follow_important_links(response)
+    
+    def _extract_content(self, response):
+        """Extract content with hierarchical approach."""
+        extracted_text = []
+        
+        # Try multiple extraction methods
+        
+        # 1. Extract paragraph text
+        paragraphs = response.css('p::text, p *::text').getall()
+        clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        extracted_text.extend(clean_paragraphs)
+        
+        # 2. Extract headings
+        headings = response.css('h1::text, h2::text, h3::text, h4::text, h1 *::text, h2 *::text, h3 *::text, h4 *::text').getall()
+        clean_headings = [h.strip() for h in headings if h.strip()]
+        extracted_text.extend(clean_headings)
+        
+        # 3. Extract div text (if text is still minimal)
+        if len(' '.join(extracted_text)) < 500:
+            # Look for divs that likely contain content
+            content_divs = response.css('div.content, div.main, div.article, div#content, div#main, article')
+            
+            if content_divs:
+                # Extract text from identified content divs
+                for div in content_divs:
+                    div_texts = div.css('*::text').getall()
+                    clean_div_texts = [t.strip() for t in div_texts if t.strip()]
+                    extracted_text.extend(clean_div_texts)
+            else:
+                # If no content divs found, look for any divs with substantial text
+                for div in response.css('div'):
+                    # Check if div doesn't contain other divs or paragraphs (likely a text node)
+                    if not div.css('div, p'):
+                        div_text = ' '.join(div.css('::text').getall()).strip()
+                        if len(div_text) > 50:  # Only include substantive text
+                            extracted_text.append(div_text)
+        
+        # 4. Extract list items
+        list_items = response.css('li::text, li *::text').getall()
+        clean_list_items = [li.strip() for li in list_items if li.strip()]
+        extracted_text.extend(clean_list_items)
+        
+        # 5. Extract meta description if content is still minimal
+        if len(' '.join(extracted_text)) < 100:
+            meta_desc = response.css('meta[name="description"]::attr(content)').get()
+            if meta_desc and meta_desc.strip():
+                extracted_text.append(meta_desc.strip())
+        
+        # Clean and join the extracted text
+        all_text = ' '.join(extracted_text)
+        
+        # Remove excessive whitespace
+        all_text = re.sub(r'\s+', ' ', all_text).strip()
+        
+        return all_text
+    
+    def _follow_important_links(self, response):
+        """Follow important links like About, Services pages."""
+        # Define patterns for important pages
+        important_patterns = [
+            'about', 'services', 'solutions', 'products', 'company',
+            'what-we-do', 'technology', 'capabilities'
+        ]
+        
+        # Extract all links
+        links = response.css('a[href]')
+        
+        # Filter to internal links on the same domain
+        same_domain_links = []
+        for link in links:
+            href = link.attrib['href']
+            
+            # Handle relative URLs
+            if href.startswith('/'):
+                full_url = response.urljoin(href)
+                same_domain_links.append(full_url)
+            else:
+                # Check if link is to same domain
+                try:
+                    url_domain = urlparse(href).netloc
+                    if url_domain == self.domain or url_domain == 'www.' + self.domain:
+                        same_domain_links.append(href)
+                except Exception:
+                    continue
+        
+        # Prioritize important links
+        important_links = []
+        for link in same_domain_links:
+            link_lower = link.lower()
+            if any(pattern in link_lower for pattern in important_patterns):
+                important_links.append(link)
+        
+        # Limit to 5 most important links
+        important_links = list(set(important_links))[:5]
+        
+        # Follow important links
+        for link in important_links:
+            if self.js_required:
+                yield scrapy.Request(
+                    link, 
+                    callback=self.parse,
+                    meta={
+                        'js_render': True,
+                        'domain_type': 'js_heavy',
+                        'dont_redirect': False
+                    }
+                )
+            else:
+                yield scrapy.Request(link, callback=self.parse)
+
+
+class EnhancedScrapyCrawler:
+    """Enhanced Scrapy crawler for domain classification."""
+    
+    def __init__(self):
+        """Initialize the crawler."""
         self.results = []
         self.runner = CrawlerRunner({
-            # Add these settings to increase reliability
+            # Add settings to increase reliability
             'HTTPERROR_ALLOW_ALL': True,
             'DOWNLOAD_FAIL_ON_DATALOSS': False,
-            'COOKIES_ENABLED': False,
+            'COOKIES_ENABLED': True,
             'RETRY_ENABLED': True,
-            'RETRY_TIMES': 2,
-            'DOWNLOAD_TIMEOUT': 30,
-            'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'RETRY_TIMES': 3,
+            'DOWNLOAD_TIMEOUT': 40,
+            'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'DOWNLOADER_CLIENTCONTEXTFACTORY': 'scrapy.core.downloader.contextfactory.BrowserLikeContextFactory'
         })
         dispatcher.connect(self._crawler_results, signal=signals.item_scraped)
 
     def _crawler_results(self, item):
+        """Collect scraped items."""
         self.results.append(item)
 
-    class GenericSpider(scrapy.Spider):
-        name = "generic_spider"
-        custom_settings = {
-            'DEPTH_LIMIT': 1,  # Only homepage and direct links
-            'LOG_LEVEL': 'INFO'
-        }
-
-        def __init__(self, url):
-            self.start_urls = [url]
-
-        def parse(self, response):
-            try:
-                # Try multiple extraction methods for better coverage
-                paragraphs = []
-                
-                # Method 1: Extract paragraph text
-                p_texts = response.xpath('//p//text()').getall()
-                if p_texts:
-                    paragraphs.extend(p_texts)
-                
-                # Method 2: Extract headings if we don't have enough text
-                if len(' '.join(paragraphs)) < 100:
-                    h_texts = response.xpath('//h1//text() | //h2//text() | //h3//text()').getall()
-                    paragraphs.extend(h_texts)
-                
-                # Method 3: Extract div text if still not enough
-                if len(' '.join(paragraphs)) < 200:
-                    div_texts = response.xpath('//div[string-length(normalize-space(string())) > 20]//text()').getall()
-                    paragraphs.extend(div_texts)
-                
-                # Method 4: Last resort - just get any visible text
-                if len(' '.join(paragraphs)) < 300:
-                    body_texts = response.xpath('//body//text()[string-length(normalize-space()) > 5]').getall()
-                    paragraphs.extend(body_texts)
-                
-                # Method 5: Get title and meta description for very minimal content
-                if len(' '.join(paragraphs)) < 50:
-                    title = response.xpath('//title/text()').get()
-                    if title:
-                        paragraphs.append(title)
-                    meta_desc = response.xpath('//meta[@name="description"]/@content').get()
-                    if meta_desc:
-                        paragraphs.append(meta_desc)
-                
-                # Clean up the text
-                paragraphs = [p.strip() for p in paragraphs if p and p.strip()]
-                
-                # Add raw HTML as a fallback for parked domain detection
-                raw_html = response.body.decode('utf-8', errors='ignore')
-                
-                yield {
-                    'url': response.url, 
-                    'paragraphs': paragraphs,
-                    'raw_html': raw_html
-                }
-                
-                # Only follow a few links from homepage to avoid wasting resources
-                if response.url == self.start_urls[0]:
-                    for href in response.xpath('//a/@href').getall()[:10]:  # Limit to 10 links
-                        if href.startswith("mailto:") or href.startswith("tel:"):
-                            continue
-                        yield response.follow(href, callback=self.parse)
-                        
-            except Exception as e:
-                self.logger.error(f"Error parsing {response.url}: {e}")
-                # Don't fail completely, just return what we have
-                yield {'url': response.url, 'paragraphs': paragraphs if 'paragraphs' in locals() else []}
-
-    @crochet.wait_for(timeout=60.0)  # Reduced timeout to avoid hanging
+    @crochet.wait_for(timeout=120.0)  # Increased timeout for JS rendering
     def _run_spider(self, url):
-        return self.runner.crawl(ScrapyCrawler.GenericSpider, url=url)
+        """Run the enhanced spider."""
+        return self.runner.crawl(EnhancedScrapySpider, url=url)
 
     def scrape(self, url):
+        """Scrape a website with enhanced content extraction."""
         self.results.clear()
         try:
+            logger.info(f"Starting enhanced Scrapy crawl for {url}")
             self._run_spider(url)
-            text = "\n".join(
-                paragraph
-                for item in self.results
-                for paragraph in item.get('paragraphs', [])
-            )
             
-            # If text is minimal or empty, check the raw HTML for parked domain indicators
-            if not text or len(text.strip()) < 100:
-                raw_html = ""
-                for item in self.results:
-                    if item.get('raw_html'):
-                        raw_html += item.get('raw_html')
-                
-                # If we have raw HTML, return it for parked domain detection
+            # Process results
+            all_content = []
+            
+            # First add homepage content
+            homepage_content = next((item['content'] for item in self.results if item.get('is_homepage', False)), None)
+            if homepage_content:
+                all_content.append(homepage_content)
+            
+            # Then add other page content
+            for item in self.results:
+                if not item.get('is_homepage', False) and item.get('content'):
+                    all_content.append(item.get('content'))
+            
+            # Combine all content
+            combined_text = ' '.join(all_content)
+            
+            # Clean up the text
+            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+            
+            if not combined_text or len(combined_text.strip()) < 100:
+                logger.warning(f"Minimal or no content extracted for {url}")
+                # Check if we have raw HTML to return for parked domain detection
+                raw_html = next((item.get('raw_html') for item in self.results if item.get('raw_html')), None)
                 if raw_html:
                     return raw_html
             
-            return text
+            logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
+            return combined_text
+            
         except Exception as e:
-            logger.error(f"Error in Scrapy crawler: {e}")
+            logger.error(f"Error in Enhanced Scrapy crawler: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
 
-def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
+def enhanced_scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional[str]]]:
     """
-    Crawl a website using Scrapy with better error handling.
+    Crawl a website using enhanced Scrapy with better error handling.
     
     Args:
         url (str): The URL to crawl
@@ -144,7 +588,7 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             - error_detail: Detailed error message if failed, None if successful
     """
     try:
-        logger.info(f"Starting Scrapy crawl for {url}")
+        logger.info(f"Starting enhanced Scrapy crawl for {url}")
         
         # Parse the domain for parked domain checking later
         domain = urlparse(url).netloc
@@ -152,17 +596,29 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
             domain = domain[4:]
         
         # Create crawler instance and scrape
-        crawler = ScrapyCrawler()
+        crawler = EnhancedScrapyCrawler()
         content = crawler.scrape(url)
+        
+        # Check for parked domain indicators in content before proceeding
+        if content:
+            from domain_classifier.classifiers.decision_tree import is_parked_domain
+            if is_parked_domain(content, domain):
+                logger.info(f"Detected parked domain from enhanced Scrapy content: {domain}")
+                return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                
+            # Check for proxy errors or hosting provider mentions that indicate parked domains
+            if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
+                                               ["proxy error", "error connecting", "godaddy", 
+                                                "domain registration", "hosting provider", "buy this domain"]):
+                logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
+                return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
         # Return is_parked even with minimal or empty content
         if not content or len(content.strip()) < 100:
-            logger.warning(f"Scrapy crawl returned minimal or no content for {domain}")
-            # Still try to check if it's a parked domain, even with minimal content
-            from domain_classifier.crawlers.direct_crawler import direct_crawl
-            
+            logger.warning(f"Enhanced Scrapy crawl returned minimal or no content for {domain}")
+            # Try a direct crawl as backup to check for parked domain
             try:
-                # Try a direct crawl as backup to check for parked domain
+                from domain_classifier.crawlers.direct_crawler import direct_crawl
                 direct_content, _, _ = direct_crawl(url, timeout=5.0)
                 
                 # Check the direct content for parked domain indicators
@@ -175,34 +631,20 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                 logger.warning(f"Direct crawl failed for parked check: {direct_err}")
             
             return None, ("minimal_content", "Website returned minimal or no content")
-                
-        # Check for parked domain indicators in content before proceeding
-        if content:
-            from domain_classifier.classifiers.decision_tree import is_parked_domain
-            if is_parked_domain(content, domain):
-                logger.info(f"Detected parked domain from Scrapy content: {domain}")
-                return None, ("is_parked", "Domain appears to be parked based on content analysis")
-                
-            # Check for proxy errors or hosting provider mentions that indicate parked domains
-            if len(content.strip()) < 300 and any(phrase in content.lower() for phrase in 
-                                               ["proxy error", "error connecting", "godaddy", 
-                                                "domain registration", "hosting provider", "buy this domain"]):
-                logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
-                return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
         if content and len(content.strip()) > 100:
-            logger.info(f"Scrapy crawl successful, got {len(content)} characters")
+            logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
             return content, (None, None)
         elif content:
             # Got some content but not much - might be enough for classification
-            logger.warning(f"Scrapy crawl returned minimal content: {len(content)} characters")
+            logger.warning(f"Enhanced Scrapy crawl returned minimal content: {len(content)} characters")
             return content, (None, None)
         else:
-            logger.warning(f"Scrapy crawl returned no content")
+            logger.warning(f"Enhanced Scrapy crawl returned no content")
             return None, ("minimal_content", "Website returned minimal or no content")
             
     except Exception as e:
         from domain_classifier.crawlers.apify_crawler import detect_error_type
         error_type, error_detail = detect_error_type(str(e))
-        logger.error(f"Error in Scrapy crawler: {e} (Type: {error_type})")
+        logger.error(f"Error in Enhanced Scrapy crawler: {e} (Type: {error_type})")
         return None, (error_type, error_detail)
