@@ -54,6 +54,11 @@ class RotatingUserAgentMiddleware:
         self.current_index = 0
     
     def process_request(self, request, spider):
+        # Skip non-HTML resources
+        if any(ext in request.url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.pdf', '.css', '.js']):
+            request.meta['skip_non_html'] = True
+            return None
+            
         # Rotate through user agents
         user_agent = self.USER_AGENTS[self.current_index]
         self.current_index = (self.current_index + 1) % len(self.USER_AGENTS)
@@ -79,6 +84,10 @@ class SmartRetryMiddleware:
         return cls(crawler.settings)
     
     def process_response(self, request, response, spider):
+        # Skip non-HTML resources
+        if request.meta.get('skip_non_html', False):
+            return response
+            
         # Check if response is in retry codes
         if request.meta.get('dont_retry', False):
             return response
@@ -98,6 +107,10 @@ class SmartRetryMiddleware:
         return response
     
     def process_exception(self, request, exception, spider):
+        # Skip non-HTML resources
+        if request.meta.get('skip_non_html', False):
+            return None
+            
         # Handle connection-related exceptions
         retry_count = request.meta.get('retry_count', 0)
         
@@ -283,6 +296,10 @@ class JavaScriptMiddleware:
     
     def process_request(self, request, spider):
         """Process request to handle JavaScript-heavy sites."""
+        # Skip non-HTML resources
+        if request.meta.get('skip_non_html', False):
+            return None
+            
         # Only use Selenium for requests that need JS rendering
         if request.meta.get('js_render', False):
             # Initialize Selenium if not done already
@@ -471,6 +488,10 @@ class EnhancedScrapySpider(scrapy.Spider):
     
     def parse(self, response):
         """Parse response with improved content extraction."""
+        # Skip non-HTML responses
+        if not hasattr(response, 'text'):
+            return 
+        
         # Check for empty responses
         if not response.body:
             logger.warning(f"Empty response body for {response.url}")
@@ -498,6 +519,7 @@ class EnhancedScrapySpider(scrapy.Spider):
             'raw_html': response.text[:50000] if len(content) < 30 else None  # Store raw HTML if extraction failed
         }
         
+        # Add content to our collection
         self.content_fragments.append(url_info)
         
         # Only follow links from homepage to avoid crawling too much
@@ -642,8 +664,12 @@ class EnhancedScrapySpider(scrapy.Spider):
         for link in links:
             href = link.attrib['href']
             
-            # Skip if it's one of these types
+            # Skip if it's one of these types or contains file extensions
             if not href or href.startswith('#') or href.startswith('mailto:') or href.startswith('tel:'):
+                continue
+                
+            # Skip media files
+            if any(href.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.mp4', '.mp3', '.css', '.js']):
                 continue
                 
             # Handle relative URLs
@@ -727,23 +753,34 @@ class EnhancedScrapyCrawler:
             all_content = []
             has_raw_html = False
             raw_html = None
-            
-            # First add homepage content
-            homepage_content = next((item['content'] for item in self.results if item.get('is_homepage', False)), None)
-            if homepage_content:
+
+            # First process the homepage content (most important)
+            homepage_content = None
+            for item in self.results:
+                if item.get('is_homepage', False):
+                    homepage_content = item.get('content', '')
+                    if item.get('raw_html'):
+                        has_raw_html = True
+                        raw_html = item.get('raw_html')
+                    break
+
+            # If homepage has meaningful content, add it first
+            if homepage_content and len(homepage_content.strip()) > 30:
                 all_content.append(homepage_content)
             
-            # Check if we have raw HTML for homepage
-            for item in self.results:
-                if item.get('is_homepage', False) and item.get('raw_html'):
-                    has_raw_html = True
-                    raw_html = item.get('raw_html')
-                    break
-            
-            # Then add other page content
+            # Then add other page content - focus on sorting by length to get most content-rich pages
+            other_content = []
             for item in self.results:
                 if not item.get('is_homepage', False) and item.get('content'):
-                    all_content.append(item.get('content'))
+                    other_content.append(item.get('content', ''))
+
+            # Sort other content by length (longest first) to prioritize content-rich pages
+            other_content.sort(key=lambda x: len(x), reverse=True)
+            
+            # Add top 5 other pages with most content
+            for content in other_content[:5]:
+                if len(content) > 30:  # Only add meaningful content
+                    all_content.append(content)
             
             # Combine all content
             combined_text = ' '.join(all_content)
@@ -751,19 +788,27 @@ class EnhancedScrapyCrawler:
             # Clean up the text
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
             
-            # Lowered threshold for acceptable content length to 30 characters
-            if not combined_text or len(combined_text.strip()) < 30:
-                logger.warning(f"Minimal or no content extracted for {url}")
+            # Improved logic: Return the content if we have any meaningful amount
+            if combined_text and len(combined_text.strip()) > 30:
+                logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
+                return combined_text
                 
-                # If we have raw HTML, use it for parked domain detection
-                if has_raw_html and raw_html:
-                    logger.info(f"Using raw HTML for parked domain detection ({len(raw_html)} characters)")
-                    return raw_html
-                    
-                return None
+            # Check all items again if we somehow missed content
+            all_content_items = [item.get('content', '') for item in self.results if item.get('content')]
+            all_content_items = [content for content in all_content_items if len(content.strip()) > 30]
             
-            logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
-            return combined_text
+            if all_content_items:
+                combined_text = ' '.join(all_content_items)
+                logger.info(f"Found content in alternate scan, extracted {len(combined_text)} characters")
+                return combined_text
+                
+            # If we have raw HTML, use it for parked domain detection
+            if has_raw_html and raw_html:
+                logger.warning(f"No extracted content, using raw HTML for parked domain detection ({len(raw_html)} characters)")
+                return raw_html
+                
+            logger.warning(f"Minimal or no content extracted for {url}")
+            return None
             
         except Exception as e:
             logger.error(f"Error in Enhanced Scrapy crawler: {e}")
