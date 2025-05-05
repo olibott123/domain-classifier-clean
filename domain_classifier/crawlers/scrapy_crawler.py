@@ -788,15 +788,40 @@ class EnhancedScrapyCrawler:
             # Clean up the text
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
             
-            # Improved logic: Return the content if we have any meaningful amount
-            if combined_text and len(combined_text.strip()) > 30:
+            # Critical Fix 1: Look for content directly from the results if combined text is empty
+            if (not combined_text or len(combined_text) < 100) and self.results:
+                logger.info("No combined text or minimal content, trying alternate extraction")
+                
+                # Approach 1: Try to get the longest content item directly
+                content_items = [(item.get('content', ''), len(item.get('content', ''))) for item in self.results 
+                                if item.get('content') and len(item.get('content', '').strip()) > 30]
+                
+                # Sort by content length
+                content_items.sort(key=lambda x: x[1], reverse=True)
+                
+                if content_items:
+                    # Get the longest content item
+                    longest_content, length = content_items[0]
+                    logger.info(f"Using longest content item directly: {length} characters")
+                    return longest_content
+            
+            # Critical Fix 2: Look at the first item directly if we're still empty
+            if (not combined_text or len(combined_text) < 100) and self.results and len(self.results) > 0:
+                first_item = self.results[0]
+                content = first_item.get('content', '')
+                if content and len(content.strip()) > 30:
+                    logger.info(f"Using first result content directly: {len(content)} characters")
+                    return content
+                    
+            # Critical Fix 3: If we have any content in combined_text, return it regardless of size
+            if combined_text and len(combined_text.strip()) > 0:
                 logger.info(f"Enhanced Scrapy crawl completed for {url}, extracted {len(combined_text)} characters")
                 return combined_text
                 
-            # Check all items again if we somehow missed content
+            # Critical Fix 4: Check all items again if we somehow missed content
             all_content_items = [item.get('content', '') for item in self.results if item.get('content')]
-            all_content_items = [content for content in all_content_items if len(content.strip()) > 30]
             
+            # No minimum size filter here anymore - we'll take anything if we reach this point
             if all_content_items:
                 combined_text = ' '.join(all_content_items)
                 logger.info(f"Found content in alternate scan, extracted {len(combined_text)} characters")
@@ -807,7 +832,12 @@ class EnhancedScrapyCrawler:
                 logger.warning(f"No extracted content, using raw HTML for parked domain detection ({len(raw_html)} characters)")
                 return raw_html
                 
-            logger.warning(f"Minimal or no content extracted for {url}")
+            # Only log a warning if we truly have nothing
+            if not self.results or len(self.results) == 0:
+                logger.warning(f"No results returned for {url}")
+            else:
+                logger.warning(f"Results found but no extractable content for {url}")
+                
             return None
             
         except Exception as e:
@@ -855,9 +885,15 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                 logger.info(f"Domain {domain} appears to be parked based on proxy errors or hosting mentions")
                 return None, ("is_parked", "Domain appears to be parked with a domain registrar")
         
-        # Lowered threshold for acceptable content to 30 characters (very minimal)
-        if not content or len(content.strip()) < 30:
-            logger.warning(f"Enhanced Scrapy crawl returned minimal or no content for {domain}")
+        # CRITICAL FIX: Return content even if it's minimal - Apify fallback will handle cases where truly needed
+        if content:
+            # Any content is better than falling back to Apify which takes a very long time
+            logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
+            return content, (None, None)
+        else:
+            # No content at all
+            logger.warning(f"Enhanced Scrapy crawl returned no content for {domain}")
+            
             # Try a direct crawl as backup to check for parked domain
             try:
                 from domain_classifier.crawlers.direct_crawler import direct_crawl
@@ -869,20 +905,14 @@ def scrapy_crawl(url: str) -> Tuple[Optional[str], Tuple[Optional[str], Optional
                     if is_parked_domain(direct_content, domain):
                         logger.info(f"Detected parked domain from direct content: {domain}")
                         return None, ("is_parked", "Domain appears to be parked based on content analysis")
+                    
+                    # If direct crawl got content, return it instead of falling back to Apify
+                    if len(direct_content) > 100:
+                        logger.info(f"Direct crawl succeeded with {len(direct_content)} characters")
+                        return direct_content, (None, None)
             except Exception as direct_err:
                 logger.warning(f"Direct crawl failed for parked check: {direct_err}")
             
-            return None, ("minimal_content", "Website returned minimal or no content")
-        
-        if content and len(content.strip()) > 30:  # Using reduced threshold
-            logger.info(f"Enhanced Scrapy crawl successful, got {len(content)} characters")
-            return content, (None, None)
-        elif content:
-            # Got some content but not much - might be enough for classification
-            logger.warning(f"Enhanced Scrapy crawl returned minimal content: {len(content)} characters")
-            return content, (None, None)
-        else:
-            logger.warning(f"Enhanced Scrapy crawl returned no content")
             return None, ("minimal_content", "Website returned minimal or no content")
             
     except Exception as e:
