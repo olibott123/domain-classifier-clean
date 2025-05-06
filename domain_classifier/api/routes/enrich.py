@@ -165,25 +165,26 @@ def register_enrich_routes(app, snowflake_conn):
             # Don't look up person data to save Apollo credits
             person_data = None
             
-            # Get the website content for AI extraction if needed
+            # Get the website content for AI extraction
             website_content = snowflake_conn.get_domain_content(domain)
             
-            # If Apollo data is missing or minimal, try AI extraction
-            if not company_data or _is_minimal_apollo_data(company_data):
-                logger.info(f"Apollo data missing or minimal for {domain}, attempting AI extraction")
+            # Always attempt AI extraction, regardless of Apollo data
+            logger.info(f"Attempting AI extraction for {domain}")
+            
+            # Extract company data using AI from the website content
+            if website_content:
+                ai_company_data = extract_company_data_from_content(
+                    website_content, 
+                    domain, 
+                    classification_result
+                )
                 
-                # Extract company data using AI from the website content
-                if website_content:
-                    ai_company_data = extract_company_data_from_content(
-                        website_content, 
-                        domain, 
-                        classification_result
-                    )
-                    
-                    # Add the AI-extracted data to the result
-                    if ai_company_data:
-                        logger.info(f"Successfully extracted AI company data for {domain}")
-                        classification_result["ai_company_data"] = ai_company_data
+                # Add the AI-extracted data to the result
+                if ai_company_data:
+                    logger.info(f"Successfully extracted AI company data for {domain}")
+                    classification_result["ai_company_data"] = ai_company_data
+            else:
+                logger.warning(f"No website content available for AI extraction for {domain}")
             
             # Import recommendation engine
             from domain_classifier.enrichment.recommendation_engine import DomotzRecommendationEngine
