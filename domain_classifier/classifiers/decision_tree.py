@@ -22,67 +22,55 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
         
     content_lower = content.lower()
     
-    # 1. Check for traditional parking phrases
-    parking_phrases = [
+    # 1. Check for direct explicit parking phrases (strongest indicators)
+    explicit_parking_phrases = [
         "domain is for sale", "buy this domain", "purchasing this domain", 
         "domain may be for sale", "this domain is for sale", "parked by",
-        "domain parking", "this web page is parked", "website coming soon",
-        "under construction", "site not published", "domain for sale",
-        "under development", "this website is for sale", "domain name parking",
-        "domain owner", "this page is parked", "domain has been registered",
+        "domain parking", "this web page is parked", "domain for sale",
+        "this website is for sale", "domain name parking",
         "purchase this domain"
     ]
     
-    # 2. Add hosting/registrar specific indicators
+    for phrase in explicit_parking_phrases:
+        if phrase in content_lower:
+            logger.info(f"Domain contains explicit parking phrase: '{phrase}'")
+            return True
+    
+    # 2. Check for common hosting/registrar parking indicators with additional validation
     hosting_phrases = [
         "godaddy", "hostgator", "bluehost", "namecheap", "dreamhost", 
         "domain registration", "web hosting service", "hosting provider",
         "register this domain", "domain broker", "proxy error", "error connecting",
-        "domain has expired", "domain has been registered", "courtesy page",
-        "web hosting provider", "get your own domain", "set up website",
-        "whois", "register now", "domain name search", "domain name registration"
+        "domain has expired", "domain has been registered", "courtesy page"
     ]
     
-    # Check traditional parking phrases - these are strong indicators
-    for phrase in parking_phrases:
-        if phrase in content_lower:
-            logger.info(f"Domain contains parking phrase: '{phrase}'")
-            return True
-    
-    # Check hosting phrases - more cautious with these
+    # Count hosting phrases and require more matches for positive detection
     hosting_matches = 0
     matched_phrases = []
     for phrase in hosting_phrases:
         if phrase in content_lower:
             hosting_matches += 1
             matched_phrases.append(phrase)
-            logger.info(f"Domain contains hosting/registrar phrase: '{phrase}'")
     
-    # If multiple hosting phrases are found, it's likely parked
-    if hosting_matches >= 1:
+    # Require at least 2 hosting phrases (more strict than before) to reduce false positives
+    if hosting_matches >= 2:
         logger.info(f"Domain contains {hosting_matches} hosting/registrar phrases ({', '.join(matched_phrases)}), considering as parked")
         return True
     
-    # 3. Check for proxy errors, which often indicate parked domains
-    if "proxy error" in content_lower or "error connecting" in content_lower:
-        logger.info("Domain appears to show a proxy error, likely parked")
-        return True
-        
-    # 4. Check for minimal content with specific patterns
+    # 3. Check for minimal content with specific patterns (require multiple indicators)
     if len(content.strip()) < 200:
-        # If content is minimal, check for domain name mentions
+        indicators_found = 0
+        
+        # a) Check for domain name mentions
         if domain and domain.split('.')[0].lower() in content_lower:
-            # Domain name present with minimal content often indicates parking
             domain_root = domain.split('.')[0].lower()
-            # Count how many times domain name appears
             domain_mentions = content_lower.count(domain_root)
-            if domain_mentions >= 1 and len(content.strip()) < 150:
-                logger.info(f"Domain name '{domain_root}' appears {domain_mentions} times in minimal content, likely parked")
-                return True
-                
-        # Very little content with no indicators of real site structure
+            if domain_mentions >= 2 and len(content.strip()) < 150:
+                indicators_found += 1
+        
+        # b) Very little content with no indicators of real site structure
         if len(content.strip()) < 100:
-            # Check for JavaScript frameworks before assuming parked
+            # Check for JS frameworks before assuming parked
             js_indicators = ["react", "angular", "vue", "javascript", "script", "bootstrap", "jquery"]
             has_js_indicator = any(indicator in content_lower for indicator in js_indicators)
             
@@ -91,22 +79,33 @@ def is_parked_domain(content: str, domain: str = None) -> bool:
             html_count = sum(1 for indicator in html_indicators if indicator in content_lower)
             
             if not has_js_indicator and html_count < 3:
-                logger.info(f"Domain has extremely little content ({len(content.strip())} chars) with no framework indicators, considering as parked")
-                return True
-    
-    # 5. Few unique words is a strong indicator of parked domains
-    words = re.findall(r'\b\w+\b', content_lower)
-    unique_words = set(words)
-    
-    # An active site would typically have more unique words
-    if len(unique_words) < 20 and len(content.strip()) < 200:
-        logger.info(f"Domain has very few unique words ({len(unique_words)}) and minimal content, considering as parked")
-        return True
+                indicators_found += 1
         
-    # 6. Check for cases similar to your crapanzano.net example
-    # Look for "process did not complete" situations with hosting mentions
-    if len(content.strip()) < 300 and any(phrase in content_lower for phrase in ["proxy", "gateway", "error connecting", "godaddy", "domain"]):
-        logger.info("Found proxy error or hosting service mentions with minimal content, likely parked")
+        # c) Check for organization-specific terms (to avoid false positives for churches, schools, etc.)
+        org_indicators = ["church", "school", "university", "college", "community", "ministry", 
+                         "worship", "service", "congregation", "faith", "campus", "education", 
+                         "nonprofit", "charity", "association", "council", "society"]
+        
+        # If org indicators are present, this is likely a real site with minimal content, not parked
+        if any(indicator in content_lower for indicator in org_indicators):
+            logger.info(f"Found organization indicators in content, not considering as parked")
+            return False
+        
+        # d) Check for few unique words
+        words = re.findall(r'\b\w+\b', content_lower)
+        unique_words = set(words)
+        
+        if len(unique_words) < 15:  # Decreased from 20
+            indicators_found += 1
+        
+        # Require multiple indicators for minimal content
+        if indicators_found >= 2:
+            logger.info(f"Domain has {indicators_found} indicators of being parked with minimal content")
+            return True
+    
+    # 4. Check specifically for proxy errors with hosting mentions (like crapanzano.net example)
+    if len(content.strip()) < 300 and "proxy" in content_lower and any(phrase in content_lower for phrase in ["godaddy", "domain", "hosting"]):
+        logger.info("Found proxy error with hosting service mentions, likely parked")
         return True
         
     return False
