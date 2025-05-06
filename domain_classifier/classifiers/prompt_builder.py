@@ -1,3 +1,4 @@
+"""Prompt builder for LLM-based domain classification."""
 import logging
 import os
 import csv
@@ -123,25 +124,30 @@ STEP 1: Determine if processing can complete
 STEP 2: Check if this is a parked/inactive domain
 - If the domain is parked, under construction, or for sale, classify as "Parked Domain"
 
-STEP 3: Determine if the company is a SERVICE/MANAGEMENT business:
-- Service businesses provide ongoing services, support, or managed solutions to clients
-- They typically focus on outsourced functions, consulting, or delivering specialized expertise
-- Examples: IT service providers, consultants, agencies, outsourced service providers
+STEP 3: Determine if the company is a TECHNOLOGY SERVICE/MANAGEMENT business:
+- Technology Service businesses provide technology-focused services, IT support, or managed technology solutions to clients
+- They must specifically offer technology, IT, or A/V services as their core business
+- Examples: IT service providers, cybersecurity firms, network management companies, A/V integrators
 
-STEP 4: If it IS a service business, classify into ONE of these specific service categories:
+IMPORTANT: Many non-technology businesses provide "services" to customers (healthcare, hospitality, aged care, etc.) but are NOT technology service providers. These should be classified as "Internal IT Department" even if they use the word "service" in their description.
+
+STEP 4: If it IS a technology service business, classify into ONE of these specific categories:
 1. Managed Service Provider (MSP): IT services, support, network management, cybersecurity, cloud services, etc.
 2. Integrator - Commercial A/V: Audio/visual solutions for businesses, conference rooms, commercial automation, etc.
 3. Integrator - Residential A/V: Home theater, smart home, residential automation, whole-home audio, etc.
 
-STEP 5: If it is NOT a service business, determine if it's a business that could have an internal IT department:
-- Medium to large businesses with multiple employees and locations typically can have internal IT
-- Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, etc.
+STEP 5: If it is NOT a technology service business, determine if it's a business that could have an internal IT department:
+- Medium to large businesses with multiple employees and locations typically have internal IT
+- Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, nonprofit organizations, churches, etc.
+- These are organizations that USE technology but don't PROVIDE technology services to clients
 
 IMPORTANT GUIDELINES:
-- Service businesses should have a Internal IT Department score of 0 (as they are providing services, not consuming IT internally)
-- Non-service businesses should have a Internal IT Department score between 1-100 indicating their internal IT potential
+- Technology service businesses should have an Internal IT Department score of 0 (as they are providing technology services, not consuming IT internally)
+- Non-technology service businesses should have an Internal IT Department score between 1-100 indicating their internal IT potential
+- Healthcare organizations, retirement homes, aged care facilities, hospitality businesses are NOT technology service providers, even if they offer "services" to clients
+- Churches, religious organizations, educational institutions, and nonprofits are almost always "Internal IT Department"
 - Vacation rental services, travel agencies, and hospitality businesses are NOT A/V Integrators
-- Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer IT services
+- Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer ongoing IT services
 - Media production companies are NOT necessarily A/V integrators
 - Purely online retailers or e-commerce sites generally don't provide services and are NOT MSPs
 - Transportation and logistics companies are NOT service providers in the IT sense and should be classified as Internal IT Department
@@ -160,7 +166,7 @@ Here are examples of correctly classified companies:"""
     system_prompt += """\n\nYou MUST provide your analysis in JSON format with the following structure:
 {
   "processing_status": [0 if processing failed, 1 if domain is parked, 2 if classification successful],
-  "is_service_business": [true/false - whether this is a service/management business],
+  "is_service_business": [true/false - whether this is a TECHNOLOGY service/management business - NOT just any service business],
   "predicted_class": [if is_service_business=true: "Managed Service Provider", "Integrator - Commercial A/V", or "Integrator - Residential A/V" | if is_service_business=false: "Internal IT Department" | if processing_status=0: "Process Did Not Complete" | if processing_status=1: "Parked Domain"],
   "internal_it_potential": [if is_service_business=false: score from 1-100 indicating likelihood the business could have internal IT department | if is_service_business=true: 0],
   "company_description": [A clear, detailed paragraph (75-100 words) describing what the company actually does. Include specific services, target markets, approach, and any distinctive attributes. Be specific rather than generic.],
@@ -175,13 +181,13 @@ Here are examples of correctly classified companies:"""
 
 IMPORTANT INSTRUCTIONS:
 1. You MUST follow the decision tree exactly as specified.
-2. For service businesses, provide DIFFERENT confidence scores for each category.
-3. For service businesses, the Internal IT Department score MUST be 0.
-4. For non-service businesses, all service-type confidence scores should be very low (1-10).
-5. Internal IT potential should be 0 for service businesses and scored 1-100 for non-service businesses.
+2. For technology service businesses, provide DIFFERENT confidence scores for each category.
+3. For technology service businesses, the Internal IT Department score MUST be 0.
+4. For non-technology service businesses, all service-type confidence scores should be very low (1-10).
+5. Internal IT potential should be 0 for technology service businesses and scored 1-100 for non-technology service businesses.
 6. Your llm_explanation must detail your decision process through each step.
 7. Mention specific evidence from the text that supports your classification.
-8. If the business appears to be a transport, logistics, manufacturing, or retail company, you MUST classify it as Internal IT Department, not as an MSP.
+8. Healthcare providers, aged care facilities, nursing homes, churches, and educational organizations should always be classified as Internal IT Department.
 9. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
 10. The company_description should be 1-2 substantive paragraphs (75-100 words) focusing on what the company actually does, their specific services or products, target markets, and unique attributes. Avoid vague, generic descriptions.
 
