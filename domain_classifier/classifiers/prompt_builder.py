@@ -126,31 +126,51 @@ STEP 2: Check if this is a parked/inactive domain
 
 STEP 3: Determine if the company is a TECHNOLOGY SERVICE/MANAGEMENT business:
 - Technology Service businesses provide technology-focused services, IT support, or managed technology solutions to clients
-- They must specifically offer technology, IT, or A/V services as their core business
-- Examples: IT service providers, cybersecurity firms, network management companies, A/V integrators
+- They must specifically offer technology, IT, A/V, or security/safety system services as their core business
+- Examples: IT service providers, cybersecurity firms, network management companies, A/V integrators, security system integrators
 
 IMPORTANT: Many non-technology businesses provide "services" to customers (healthcare, hospitality, aged care, etc.) but are NOT technology service providers. These should be classified as "Internal IT Department" even if they use the word "service" in their description.
 
-STEP 4: If it IS a technology service business, classify into ONE of these specific categories:
-1. Managed Service Provider (MSP): IT services, support, network management, cybersecurity, cloud services, etc.
-2. Integrator - Commercial A/V: Audio/visual solutions for businesses, conference rooms, commercial automation, etc.
-3. Integrator - Residential A/V: Home theater, smart home, residential automation, whole-home audio, etc.
+STEP 4: If it IS a technology service business, classify into ONE of these specific categories based on the following clear distinctions:
+
+1. Managed Service Provider (MSP):
+   - Primary focus: IT infrastructure management, network support, cybersecurity services, cloud hosting
+   - Key indicators: Help desk support, remote monitoring, IT consulting, network administration, server management
+   - Service model: Typically ongoing recurring services with monthly/annual contracts, service level agreements (SLAs)
+   - NOT included: One-time installation projects, hardware/equipment sales without ongoing support
+
+2. Integrator - Commercial A/V:
+   - Primary focus: Design, installation, and integration of technology systems for commercial/business environments
+   - Key indicators: Security systems, fire alarm systems, access control, surveillance, conference rooms, commercial sound systems
+   - Service model: Project-based installations, system design and maintenance contracts
+   - Specific verticals: Fire and security integrators, commercial audio/video installers, office technology integrators
+   - Note: Fire & security system companies that install and integrate systems are Commercial Integrators, not MSPs
+
+3. Integrator - Residential A/V:
+   - Primary focus: Home automation, entertainment systems, residential security for individual homeowners
+   - Key indicators: Home theater, smart home, residential surveillance, whole-house audio
+   - Service model: Custom installations for homes and high-end residences
+   - NOT included: Commercial building technologies or office-focused solutions
 
 STEP 5: If it is NOT a technology service business, determine if it's a business that could have an internal IT department:
 - Medium to large businesses with multiple employees and locations typically have internal IT
 - Enterprises, corporations, manufacturers, retailers, healthcare providers, financial institutions, nonprofit organizations, churches, etc.
 - These are organizations that USE technology but don't PROVIDE technology services to clients
 
-IMPORTANT GUIDELINES:
+IMPORTANT GUIDELINES FOR CLASSIFICATION:
 - Technology service businesses should have an Internal IT Department score of 0 (as they are providing technology services, not consuming IT internally)
 - Non-technology service businesses should have an Internal IT Department score between 1-100 indicating their internal IT potential
 - Healthcare organizations, retirement homes, aged care facilities, hospitality businesses are NOT technology service providers, even if they offer "services" to clients
 - Churches, religious organizations, educational institutions, and nonprofits are almost always "Internal IT Department"
-- Vacation rental services, travel agencies, and hospitality businesses are NOT A/V Integrators
+- Security system integrators and fire alarm companies that primarily install and integrate systems in commercial buildings are "Commercial A/V Integrators", not MSPs
+- Companies that focus on ongoing IT infrastructure management and network support are MSPs
+- Companies that primarily design and install integrated systems in buildings are Commercial Integrators
+- Companies that primarily serve residential clients with home systems are Residential Integrators
+- Vacation rental services, travel agencies, and hospitality businesses are NOT technology service providers
 - Web design agencies and general marketing firms are NOT typically MSPs unless they explicitly offer ongoing IT services
 - Media production companies are NOT necessarily A/V integrators
-- Purely online retailers or e-commerce sites generally don't provide services and are NOT MSPs
-- Transportation and logistics companies are NOT service providers in the IT sense and should be classified as Internal IT Department
+- Purely online retailers or e-commerce sites generally don't provide technology services and are NOT MSPs
+- Transportation and logistics companies are NOT technology service providers
 
 Here are examples of correctly classified companies:"""
 
@@ -190,6 +210,7 @@ IMPORTANT INSTRUCTIONS:
 8. Healthcare providers, aged care facilities, nursing homes, churches, and educational organizations should always be classified as Internal IT Department.
 9. Your explanation MUST be formatted with STEP 1, STEP 2, etc. clearly labeled for each stage of the decision tree.
 10. The company_description should be 1-2 substantive paragraphs (75-100 words) focusing on what the company actually does, their specific services or products, target markets, and unique attributes. Avoid vague, generic descriptions.
+11. REMEMBER: Fire and security system integrators should be classified as "Integrator - Commercial A/V", not as MSPs.
 
 YOUR RESPONSE MUST BE A SINGLE VALID JSON OBJECT WITH NO OTHER TEXT BEFORE OR AFTER."""
 
